@@ -9,6 +9,27 @@ statements) → get a clean, interactive entity-relationship diagram.
 schema never leaves your machine — no server, no backend. Live at
 **[sqltoerdiagram.com](https://sqltoerdiagram.com)**.
 
+## What this fork adds
+
+- **Arrange ▾ → Arrange lines straight**: every relation becomes a right-angle line
+  that goes around tables, each line enters its table at its own point, lines keep
+  to their own lanes where there's room, and crossings are drawn as small
+  semicircle jumps. It runs in the background, so the page stays responsive.
+- **Arrange ▾ → Arrange lines**: the curved version. It spreads entry points so no
+  two lines share one, and picks paths that avoid tables and crossings.
+- **Lines you can edit**: click a line to pin it (everything else dims), drag its
+  middle to bend it, drag either end to move where it enters or leaves a table.
+  Press **Delete** to remove a pinned manual link. A table's right-click menu lists
+  its manual links, so each one can be removed on its own.
+- **Groups**: the group name is always drawn on top. A group moves only when you
+  drag its name, and its tables move with it. The fifth colour dot opens a picker
+  for any hex colour.
+- **Search**: **Ctrl + F** finds tables and fields and jumps to them.
+- **Undo / redo**: **Ctrl + Z**, **Ctrl + Y** (or **Ctrl + Shift + Z**). Arrange
+  asks before re-arranging tables that are in groups.
+- **MCP server** so an AI assistant such as Claude Code can drive the open
+  diagram (see [MCP](#mcp) below).
+
 ## Why
 
 Every other SQL-diagram tool is either paywalled, ugly, or slow. SQL to ER Diagram is
@@ -85,6 +106,23 @@ npm install
 npm run dev      # http://localhost:5173
 ```
 
+## MCP
+
+`mcp/server.mjs` is an MCP server (stdio) that controls the diagram open at
+`http://localhost:5173` in dev mode. It can load and save projects, arrange tables
+and lines, add or remove links, set groups and notes, and take screenshots.
+
+1. Start the app with `npm run dev` and open it in **one** browser. The newest tab
+   to connect (or the last one focused) receives the commands.
+2. Register the server with Claude Code:
+
+   ```bash
+   claude mcp add sql-to-erd -- node /path/to/sqlToDiagram/mcp/server.mjs
+   ```
+
+The page talks to the server through `127.0.0.1:5199` only, and only from the dev
+server's origin. The bridge isn't included in production builds.
+
 ## Build & host
 
 ```bash
@@ -127,6 +165,9 @@ Select **BigQuery** from the dialect dropdown to work with BigQuery SQL instead 
 | Key | Action |
 | --- | --- |
 | **⌘ / Ctrl + Enter** | Re-arrange |
+| **Ctrl + F** | Search tables and fields |
+| **Ctrl + Z** / **Ctrl + Y** | Undo / redo |
+| **Delete** | Remove the pinned manual link |
 | **Double-click** canvas | Zoom in |
 | Drag the pane divider | Resize the editor |
 

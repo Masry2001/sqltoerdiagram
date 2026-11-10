@@ -18,6 +18,14 @@ export const GROUP_COLORS = {
 export const NOTE_ORDER = ['yellow', 'blue', 'green', 'pink'];
 export const GROUP_ORDER = ['blue', 'green', 'amber', 'purple'];
 
+// A group can also use any colour, stored as a hex code like "#e05a9b".
+export const isHexColor = (c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
+
+export function groupColor(color) {
+  if (GROUP_COLORS[color]) return GROUP_COLORS[color];
+  return isHexColor(color) ? color.toLowerCase() : GROUP_COLORS.blue;
+}
+
 let seq = 0;
 function newId() {
   seq += 1;
@@ -39,13 +47,16 @@ export function sanitizeAnnotations(arr) {
     if (!a || (a.type !== 'group' && a.type !== 'note')) continue;
     if (![a.x, a.y, a.w, a.h].every(Number.isFinite)) continue;
     const colors = a.type === 'group' ? GROUP_COLORS : NOTE_COLORS;
+    const customGroupColor = a.type === 'group' && isHexColor(a.color);
     out.push({
       id: typeof a.id === 'string' ? a.id : newId(),
       type: a.type,
       x: a.x, y: a.y,
       w: Math.max(80, a.w), h: Math.max(50, a.h),
       text: typeof a.text === 'string' ? a.text : '',
-      color: colors[a.color] ? a.color : (a.type === 'group' ? 'blue' : 'yellow'),
+      color: colors[a.color] ? a.color
+        : customGroupColor ? a.color.toLowerCase()
+          : (a.type === 'group' ? 'blue' : 'yellow'),
     });
   }
   return out;

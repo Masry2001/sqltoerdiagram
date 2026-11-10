@@ -1,7 +1,9 @@
 // Build a standalone SVG string of the current diagram (vector, theme-aware).
 import { THEMES, columnY, ROW_H, HEADER_H } from './renderer.js';
-import { NOTE_COLORS, GROUP_COLORS } from './annotations.js';
+import { NOTE_COLORS, groupColor } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
+import { routeEdges } from './edge-routing.js';
+import { pathFits, pathJumps, JUMP_RADIUS } from './orthogonal-router.js';
 
 // Crow's-foot cardinality marker at a line endpoint (world coords).
 //   dir = +1 if the line extends in +x from (x,y), else -1.
@@ -33,7 +35,24 @@ const hexA = (hex, a) => {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 };
 
-export function exportSVG(model, themeName, annotations = [], hidden = null) {
+// A straight path as SVG; a jump is a semicircle over the line it crosses.
+function svgPath(points, jumps = []) {
+  let d = `M ${points[0][0]} ${points[0][1]}`;
+  for (let i = 1; i < points.length; i++) {
+    const [x1, y1] = points[i - 1], [x2, y2] = points[i];
+    if (y1 === y2) {
+      const dir = Math.sign(x2 - x1);
+      const here = jumps.filter(([seg]) => seg === i).map(([, x]) => x).sort((a, b) => (a - b) * dir);
+      for (const x of here) {
+        d += ` L ${x - dir * JUMP_RADIUS} ${y1} A ${JUMP_RADIUS} ${JUMP_RADIUS} 0 0 ${dir > 0 ? 1 : 0} ${x + dir * JUMP_RADIUS} ${y1}`;
+      }
+    }
+    d += ` L ${x2} ${y2}`;
+  }
+  return d;
+}
+
+export function exportSVG(model, themeName, annotations = [], hidden = null, edgeBends = {}, edgeAnchors = {}, edgePaths = {}) {
   const theme = THEMES[themeName] || THEMES.dark;
   const isHidden = (k) => !!(hidden && hidden.has(k));
   const ts = model.tables.filter(t => Number.isFinite(t.x) && !isHidden(t.key));
@@ -60,29 +79,42 @@ export function exportSVG(model, themeName, annotations = [], hidden = null) {
   // group boxes (behind everything)
   for (const a of annotations) {
     if (a.type !== 'group') continue;
-    const color = GROUP_COLORS[a.color] || GROUP_COLORS.blue;
+    const color = groupColor(a.color);
     parts.push(`<rect x="${a.x}" y="${a.y}" width="${a.w}" height="${a.h}" rx="12" fill="${hexA(color, 0.08)}" stroke="${hexA(color, 0.7)}" stroke-width="1.5"/>`);
     if (a.text) parts.push(`<text x="${a.x + 10}" y="${a.y + 16}" dominant-baseline="middle" font-weight="600" font-size="13" fill="${color}">${esc(a.text)}</text>`);
   }
 
   // edges
-  for (const r of model.relations) {
-    const from = byKey.get(r.fromTable.toLowerCase());
-    const to = byKey.get(r.toTable.toLowerCase());
-    if (!from || !to || !Number.isFinite(from.x) || !Number.isFinite(to.x)) continue;
-    if (isHidden(from.key) || isHidden(to.key)) continue;
-    const fy = from.y + columnY(from, r.fromCols[0]);
-    const ty = to.y + columnY(to, r.toCols[0]);
-    const fromRight = (from.x + from.w / 2) < (to.x + to.w / 2);
-    const fx = fromRight ? from.x + from.w : from.x;
-    const tx = fromRight ? to.x : to.x + to.w;
-    const dx = Math.max(28, Math.abs(tx - fx) * 0.4);
-    const c1x = fx + (fromRight ? dx : -dx);
-    const c2x = tx + (fromRight ? -dx : dx);
-    parts.push(`<path d="M ${fx} ${fy} C ${c1x} ${fy}, ${c2x} ${ty}, ${tx} ${ty}" fill="none" stroke="${theme.edge}" stroke-width="1.5"/>`);
-    const card = relationCardinality(r, byKey);
-    parts.push(svgMarker(fx, fy, Math.sign(c1x - fx) || 1, card.from, theme.edge));
-    parts.push(svgMarker(tx, ty, Math.sign(c2x - tx) || 1, card.to, theme.edge));
+  const edges = model.relations.map((r) => ({
+    fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(),
+    fromCol: r.fromCols[0], toCol: r.toCols[0],
+    card: relationCardinality(r, byKey),
+  }));
+  const routed = routeEdges(edges, byKey, isHidden, edgeBends, edgeAnchors);
+  // straight paths (Arrange lines straight) replace curves while they fit
+  const facing = { right: 1, bottom: 1, left: -1, top: -1 };
+  for (const seg of routed) {
+    const path = edgePaths[seg.id];
+    if (!path || !pathFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) continue;
+    const first = path.points[0], last = path.points[path.points.length - 1];
+    Object.assign(seg, {
+      path: path.points, fx: first[0], fy: first[1], tx: last[0], ty: last[1],
+      fromDir: facing[path.fromSide], toDir: facing[path.toSide],
+      fromVertical: path.fromSide === 'top' || path.fromSide === 'bottom',
+      toVertical: path.toSide === 'top' || path.toSide === 'bottom',
+    });
+  }
+  const jumps = pathJumps(routed.filter((s) => s.path).map((s) => ({ id: s.id, points: s.path })), JUMP_RADIUS + 1);
+  for (const seg of routed) {
+    const { fx, fy, tx, ty, c1x, c1y, c2x, c2y, card, fromDir, toDir, fromVertical, toVertical } = seg;
+    const d = seg.path ? svgPath(seg.path, jumps[seg.id]) : `M ${fx} ${fy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${tx} ${ty}`;
+    parts.push(`<path d="${d}" fill="none" stroke="${theme.edge}" stroke-width="1.5"/>`);
+    const marker = (x, y, dir, kind, vertical) => {
+      const drawn = svgMarker(x, y, dir, kind, theme.edge);
+      return vertical ? `<g transform="rotate(90 ${x} ${y})">${drawn}</g>` : drawn;
+    };
+    parts.push(marker(fx, fy, fromDir, card.from, fromVertical));
+    parts.push(marker(tx, ty, toDir, card.to, toVertical));
   }
 
   // tables

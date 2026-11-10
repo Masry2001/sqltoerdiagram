@@ -12,7 +12,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/edit.test.mjs"
+    "test": "node test/edit.test.mjs && node test/edge-routing.test.mjs && node test/search.test.mjs && node test/line-arranger.test.mjs && node test/orthogonal-router.test.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4"

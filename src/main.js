@@ -3,13 +3,14 @@ import { parseSchema, FORMATS } from './parse.js';
 import { layout } from './layout.js';
 import { Diagram } from './diagram.js';
 import { exportSVG } from './svg-export.js';
+import { createSearchBox } from './search.js';
 import { serialize, SERIALIZERS } from './formats/serialize.js';
 import { applyEdit, addColumn, deleteColumn, toggleConstraint, addTable, deleteTable } from './edit.js';
 import { createVisualEditor } from './visual-editor.js';
 import { DIALECTS, DEFAULT_DIALECT } from './dialects.js';
 import { highlightSQL } from './highlight.js';
 import { encodeShare, decodeShare } from './share.js';
-import { sanitizeAnnotations } from './annotations.js';
+import { sanitizeAnnotations, groupColor } from './annotations.js';
 import { EXAMPLE_SQL } from './examples.js';
 
 const $ = (id) => document.getElementById(id);
@@ -61,15 +62,89 @@ function collectLayout() {
     annotations: diagram.annotations.map(a => ({ ...a })),
     hidden: [...diagram.hidden],
     manualLinks: diagram.manualLinks.map(l => ({ from: { ...l.from }, to: { ...l.to } })),
+    edgeBends: { ...diagram.edgeBends },
+    edgeAnchors: { ...diagram.edgeAnchors },
+    edgePaths: { ...diagram.edgePaths },
   };
 }
 function saveLayout() {
   try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(collectLayout())); } catch { /* quota */ }
+  recordHistory();
+}
+
+// ---- undo / redo: every saved change is a step; the camera is not part of it ----
+const HISTORY_LIMIT = 100;
+const undoStack = [];
+const redoStack = [];
+let applyingHistory = false;
+
+function historyState() {
+  const { camera, ...layout } = collectLayout();
+  return { sql: sqlEl.value, layout: JSON.stringify(layout) };
+}
+function recordHistory() {
+  if (applyingHistory) return;
+  const state = historyState();
+  const last = undoStack.at(-1);
+  if (last && last.sql === state.sql && last.layout === state.layout) return;
+  undoStack.push(state);
+  if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+  redoStack.length = 0;
+}
+function flushPendingSave() {
+  if (!saveTimer) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  saveLayout();
+}
+function applyHistoryState(state) {
+  const layout = JSON.parse(state.layout);
+  applyingHistory = true;
+  try {
+    if (state.sql !== sqlEl.value) {
+      sqlEl.value = state.sql;
+      rebuild({ restore: { ...layout, camera: { ...diagram.cam } } });
+    } else {
+      for (const t of diagram.model.tables) {
+        const p = layout.positions[t.key];
+        if (p) { t.x = p.x; t.y = p.y; }
+      }
+      diagram.setHidden(layout.hidden);
+      diagram.setManualLinks(layout.manualLinks);
+      diagram.setEdgeBends(layout.edgeBends);
+      diagram.setEdgeAnchors(layout.edgeAnchors);
+      diagram.setEdgePaths(layout.edgePaths);
+      diagram.setAnnotations(sanitizeAnnotations(layout.annotations));
+      diagram._tmapDirty = true;
+      diagram.markDirty();
+      renderTables();
+    }
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveLayout();
+  } finally {
+    applyingHistory = false;
+  }
+}
+function undo() {
+  flushPendingSave();
+  if (undoStack.length < 2) return false;
+  redoStack.push(undoStack.pop());
+  applyHistoryState(undoStack.at(-1));
+  return true;
+}
+function redo() {
+  flushPendingSave();
+  const state = redoStack.pop();
+  if (!state) return false;
+  undoStack.push(state);
+  applyHistoryState(state);
+  return true;
 }
 let saveTimer = null;
 function saveLayoutDebounced() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveLayout, 400);
+  saveTimer = setTimeout(() => { saveTimer = null; saveLayout(); }, 400);
 }
 function loadSavedLayout() {
   try {
@@ -136,12 +211,26 @@ canvas.addEventListener('contextmenu', (e) => {
   if (t) {
     const multi = diagram.selected.has(t) && diagram.selected.size > 1;
     items.push({ label: multi ? `Hide ${diagram.selected.size} tables` : 'Hide table', act: () => diagram.hideTable(t) });
+    // lines can be hidden behind tables, so a table lists its own manual links
+    for (const link of diagram.manualLinksOf(t.key)) {
+      items.push({
+        label: `Remove link: ${link.from.table}.${link.from.col} → ${link.to.table}.${link.to.col}`,
+        act: () => diagram.removeManualLink(link),
+      });
+    }
   } else {
     const link = diagram.linkAt(sx, sy);
     if (link) items.push({ label: 'Remove link', act: () => diagram.removeManualLink(link) });
   }
   if (diagram.hiddenCount() > 0) items.push({ label: `Show all hidden (${diagram.hiddenCount()})`, act: () => diagram.showAllHidden() });
-  if (diagram.manualLinkCount() > 0) items.push({ label: `Clear manual links (${diagram.manualLinkCount()})`, act: () => diagram.clearManualLinks() });
+  if (diagram.manualLinkCount() > 0) {
+    items.push({
+      label: `Clear all manual links (${diagram.manualLinkCount()})`,
+      act: () => {
+        if (window.confirm(`Remove all ${diagram.manualLinkCount()} manual links? This can't be undone.`)) diagram.clearManualLinks();
+      },
+    });
+  }
   if (!items.length) { hideCtx(); return; }
   ctxMenu.innerHTML = '';
   for (const it of items) {
@@ -151,9 +240,10 @@ canvas.addEventListener('contextmenu', (e) => {
     b.addEventListener('click', () => { it.act(); hideCtx(); });
     ctxMenu.appendChild(b);
   }
-  ctxMenu.style.left = sx + 'px';
-  ctxMenu.style.top = sy + 'px';
   ctxMenu.hidden = false;
+  // a table with many links has a tall menu, so keep it on screen
+  ctxMenu.style.left = Math.max(8, Math.min(sx, canvas.clientWidth - ctxMenu.offsetWidth - 8)) + 'px';
+  ctxMenu.style.top = Math.max(8, Math.min(sy, canvas.clientHeight - ctxMenu.offsetHeight - 8)) + 'px';
 });
 window.addEventListener('mousedown', (e) => { if (!ctxMenu.contains(e.target)) hideCtx(); });
 window.addEventListener('blur', hideCtx);
@@ -277,6 +367,9 @@ function rebuild({ arrange = false, restore = null } = {}) {
   if (restore) applyLayoutData(result, restore);
 
   diagram.setModel(result);
+  // setModel keeps the old position of any table that shares a name with the
+  // previous diagram, so put the restored positions back
+  if (restore) applyLayoutData(result, restore);
   diagram._tmapDirty = true;
 
   if (arrange) {
@@ -285,6 +378,9 @@ function rebuild({ arrange = false, restore = null } = {}) {
   } else if (restore) {
     diagram.setHidden(restore.hidden);               // restore hidden tables before placing
     diagram.setManualLinks(restore.manualLinks);     // restore user-drawn / inferred links
+    diagram.setEdgeBends(restore.edgeBends);         // restore lines the user has bent
+    diagram.setEdgeAnchors(restore.edgeAnchors);     // restore line ends the user has moved
+    diagram.setEdgePaths(restore.edgePaths);         // restore straight-arranged lines
     placeNewTables(result);                          // tables not in the saved layout
     diagram.setAnnotations(sanitizeAnnotations(restore.annotations));
     if (restore.camera) diagram.setCamera(restore.camera);
@@ -411,15 +507,42 @@ function syncMenu() {
 }
 syncMenu();
 
+// The button only opens and closes the menu. Direction and spacing are settings;
+// tables move only when "Arrange tables" is chosen.
 $('btn-arrange').addEventListener('click', (e) => {
   e.stopPropagation();
-  if (arrangeMenu.hidden) { arrangeMenu.hidden = false; }
-  else { arrangeMenu.hidden = true; rebuild({ arrange: true }); }
+  arrangeMenu.hidden = !arrangeMenu.hidden;
+  if (!arrangeMenu.hidden) syncMenu();
 });
+function arrangeTables() {
+  const groups = diagram.annotations.filter((a) => a.type === 'group').length;
+  if (groups && !window.confirm(
+    `Arranging moves every table and ignores your ${groups} group box${groups === 1 ? '' : 'es'}, so tables will leave them.\n\nYou can undo it with Ctrl+Z. Arrange anyway?`,
+  )) return;
+  arrangeMenu.hidden = true;
+  rebuild({ arrange: true });
+}
 arrangeMenu.addEventListener('click', (e) => {
   e.stopPropagation();
   const item = e.target.closest('.menu-item');
   if (!item) return;
+  if (item.dataset.act === 'arrange') { arrangeTables(); return; }
+  if (item.dataset.act === 'arrange-lines-straight') {
+    arrangeMenu.hidden = true;
+    const button = $('btn-arrange');
+    button.textContent = 'Arranging lines…';
+    button.disabled = true;
+    canvas.style.cursor = 'progress';
+    diagram.arrangeLinesStraight()                 // runs in a worker; Ctrl+Z undoes it
+      .catch((err) => console.error(err))
+      .finally(() => { button.textContent = 'Arrange'; button.disabled = false; canvas.style.cursor = ''; });
+    return;
+  }
+  if (item.dataset.act === 'arrange-lines') {
+    arrangeMenu.hidden = true;
+    diagram.arrangeAllLines();                     // keeps hand-placed lines; Ctrl+Z undoes it
+    return;
+  }
   if (item.dataset.dir) {
     layoutOpts.dir = item.dataset.dir;
     localStorage.setItem('dbdiga-dir', layoutOpts.dir);
@@ -429,7 +552,6 @@ arrangeMenu.addEventListener('click', (e) => {
     localStorage.setItem('dbdiga-spacing', layoutOpts.spacing);
   }
   syncMenu();
-  rebuild({ arrange: true });
 });
 document.addEventListener('click', () => { arrangeMenu.hidden = true; });
 
@@ -660,7 +782,7 @@ function exportImage(kind) {
     const url = diagram.exportPNG(2);
     if (url) download('schema.png', url);
   } else {
-    const svg = exportSVG(diagram.model, diagram.themeName, diagram.annotations, diagram.hidden);
+    const svg = exportSVG(diagram.model, diagram.themeName, diagram.annotations, diagram.hidden, diagram.edgeBends, diagram.edgeAnchors, diagram.edgePaths);
     if (svg) downloadText('schema.svg', svg, 'image/svg+xml');
   }
 }
@@ -750,7 +872,7 @@ fileInput.addEventListener('change', () => {
       localStorage.setItem('dbdiga-sql', data.sql);
       if (data.dialect && DIALECTS[data.dialect]) { dialect = data.dialect; localStorage.setItem('dbdiga-dialect', dialect); syncDialect(); }
       firstRender = true;          // ensure a clean restore even if a model exists
-      rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks } });
+      rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths } });
       saveLayout();
     } catch (err) {
       statusEl.textContent = 'Invalid project file';
@@ -784,15 +906,63 @@ window.addEventListener('mouseup', () => {
 window.addEventListener('resize', () => diagram.resize());
 
 // keyboard shortcuts
+// A group's fifth colour dot opens the browser's colour picker, which accepts
+// any colour, including a typed hex code. The change is previewed live and
+// saved (and undoable) once the picker commits it.
+const groupColorInput = document.createElement('input');
+groupColorInput.type = 'color';
+groupColorInput.className = 'group-color-input';
+groupColorInput.setAttribute('aria-label', 'Group colour');
+groupColorInput.tabIndex = -1;
+canvas.parentElement.appendChild(groupColorInput);
+let colorTarget = null;
+diagram.onPickColor = (group, sx, sy) => {
+  colorTarget = group;
+  groupColorInput.value = groupColor(group.color);
+  groupColorInput.style.left = `${sx}px`;
+  groupColorInput.style.top = `${sy}px`;
+  try { groupColorInput.showPicker(); } catch { groupColorInput.click(); }
+};
+groupColorInput.addEventListener('input', () => {
+  if (!colorTarget) return;
+  colorTarget.color = groupColorInput.value.toLowerCase();
+  diagram.markDirty();
+});
+groupColorInput.addEventListener('change', () => {
+  if (!colorTarget) return;
+  colorTarget.color = groupColorInput.value.toLowerCase();
+  diagram.markDirty();
+  diagram.onLayoutChange?.();
+  colorTarget = null;
+});
+
+// Ctrl+F searches the diagram (a canvas the browser's find can't read). In the
+// SQL editor it is left to the browser.
+const schemaSearch = createSearchBox(diagram, canvas.parentElement);
+
 window.addEventListener('keydown', (e) => {
   const typing = document.activeElement &&
     (document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'INPUT');
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f'
+      && document.activeElement !== sqlEl && !isEmbed) {
+    e.preventDefault();
+    schemaSearch.open();
+  } else if (mod && !typing && !isEmbed && e.key.toLowerCase() === 'z') {
+    // inside a text box the browser's own undo applies
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+  } else if (mod && !typing && !isEmbed && e.key.toLowerCase() === 'y') {
+    e.preventDefault();
+    redo();
+  } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
     e.preventDefault();
     rebuild({ arrange: true });
   } else if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && diagram.selectedAnno) {
     e.preventDefault();
     diagram.deleteSelectedAnnotation();
+  } else if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && diagram.removePinnedLink()) {
+    e.preventDefault();
   } else if (!typing && (e.key === 'h' || e.key === 'H') && diagram.selected.size > 0) {
     e.preventDefault();
     diagram.hideTable(null);   // hide the current selection
@@ -841,7 +1011,7 @@ if (isEmbed) {
       // a shared schema with no saved positions (e.g. gallery links) → auto-arrange
       const hasPositions = data.positions && Object.keys(data.positions).length > 0;
       if (hasPositions) {
-        rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks } });
+        rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths } });
       } else {
         rebuild({ arrange: true });
       }

@@ -26,6 +26,18 @@ function publicDirIndex() {
   };
 }
 
+// Lets the MCP server (mcp/server.mjs) drive the diagram. Dev server only: it
+// is never added to a production build.
+function mcpBridge() {
+  return {
+    name: 'mcp-bridge',
+    apply: 'serve',
+    transformIndexHtml: () => [
+      { tag: 'script', attrs: { type: 'module', src: '/mcp/bridge.js' }, injectTo: 'body' },
+    ],
+  };
+}
+
 export default defineConfig({
-  plugins: [publicDirIndex()],
+  plugins: [publicDirIndex(), mcpBridge()],
 });

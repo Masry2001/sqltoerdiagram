@@ -2,9 +2,27 @@
 // the render loop, edge routing and export. Renders only when dirty and only
 // what is on screen.
 import { THEMES, rasterizeTable, columnY, measureTable, ROW_H, HEADER_H } from './renderer.js';
-import { NOTE_COLORS, GROUP_COLORS, NOTE_ORDER, GROUP_ORDER, makeAnnotation } from './annotations.js';
+import { NOTE_COLORS, GROUP_COLORS, NOTE_ORDER, GROUP_ORDER, makeAnnotation, groupColor, isHexColor } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
+import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
+import { arrangeLines } from './line-arranger.js';
+import { pathFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS } from './orthogonal-router.js';
+
+const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
+const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
+const GROUP_LABEL_H = 32;      // screen px: the strip that holds a group's name
+const GROUP_LABEL_MIN_W = 80;  // screen px: keeps short or empty names grabbable
+const SEARCH_MIN_SCALE = 0.7;  // zoom used to show a search result that is too small to read
+const SEARCH_MARK_COLOR = '#f5b14a';
+const EDGE_HIT = 8;            // screen px: how close a click must be to select a line
+const EDGE_HANDLE_R = 7;       // screen px: the bend handle on a clicked line
+const EDGE_HANDLE_HIT = 11;    // screen px: how close a press must be to grab it
+const EDGE_END_R = 5;          // screen px: the handle at each end of a clicked line
+const EDGE_END_HIT = 10;       // screen px: how close a press must be to grab it
+const EDGE_DELETE_R = 9;       // screen px: the delete button on a clicked manual link
+const EDGE_DELETE_OFFSET = 26; // screen px: its distance to the right of the handle
+const EDGE_DELETE_COLOR = '#d9534f';
 
 export class Diagram {
   constructor(canvas) {
@@ -30,6 +48,15 @@ export class Diagram {
     this.linking = null;           // in-progress link drag {fromKey, fromCol, side, wx, wy, cx, cy}
     this.pan = null;               // active background pan
     this.hover = null;             // table under cursor (transient highlight)
+    this.hoverEdge = null;         // id of the line under the cursor
+    this.pinnedEdge = null;        // clicked line {id, fromKey, toKey} (sticky focus)
+    this.pressEdge = null;         // line under an in-progress click
+    this.edgeBends = {};           // line id -> {x, y} offset of its midpoint
+    this.edgeDrag = null;          // active bend {id, baseX, baseY, grabX, grabY, moved}
+    this.edgeAnchors = {};         // line id -> {from?, to?} ends pinned as {side, t}
+    this.edgeEndDrag = null;       // active end drag {id, end, tableKey, moved}
+    this.edgePaths = {};           // line id -> straight path {points, fromSide, toSide}
+    this.highlightedRoutes = [];   // lines emphasised on the last draw
     this.pinned = null;            // clicked table (sticky focus)
     this.pinnedKeys = null;        // Set of focused table + neighbour keys
     this.onZoom = null;
@@ -69,6 +96,10 @@ export class Diagram {
     this.marquee = null;
     this.linking = null;
     this.hoverConn = null;
+    this.hoverEdge = null;
+    this.pinnedEdge = null;
+    this.pressEdge = null;
+    this.searchMark = null;
     this.markDirty();
     if (!keepCamera) {/* caller may fit */}
   }
@@ -83,7 +114,24 @@ export class Diagram {
     this.markDirty();
   }
 
+  // Pins a clicked line, or releases it when clicked again.
+  _pinEdge(seg) {
+    this.pinned = null;
+    this.pinnedKeys = null;
+    this.pinnedEdge = this.pinnedEdge?.id === seg.id
+      ? null
+      : { id: seg.id, fromKey: seg.fromKey, toKey: seg.toKey };
+    this.markDirty();
+  }
+
+  _clearPinnedEdge() {
+    if (!this.pinnedEdge) return;
+    this.pinnedEdge = null;
+    this.markDirty();
+  }
+
   _setPin(t) {
+    this.pinnedEdge = null;
     this.pinned = t;
     const keys = new Set([t.key]);
     for (const r of this.model.relations) {
@@ -196,12 +244,14 @@ export class Diagram {
 
     // tables
     const pinned = this.pinned;
+    const pinnedEdge = this.pinnedEdge;
     for (const t of this.model.tables) {
       if (!Number.isFinite(t.x) || this.hidden.has(t.key)) continue;
       if (t.x > vx1 + margin || t.x + t.w < vx0 - margin ||
           t.y > vy1 + margin || t.y + t.h < vy0 - margin) continue;
       const bm = this._bitmap(t);
-      const dim = pinned && !this.pinnedKeys.has(t.key);
+      const onPinnedEdge = pinnedEdge && (pinnedEdge.fromKey === t.key || pinnedEdge.toKey === t.key);
+      const dim = pinnedEdge ? !onPinnedEdge : pinned && !this.pinnedKeys.has(t.key);
       ctx.save();
       ctx.globalAlpha = dim ? 0.22 : 1;
       // soft shadow (skip for dimmed tables to keep them recessive)
@@ -213,10 +263,10 @@ export class Diagram {
       ctx.drawImage(bm, t.x, t.y, t.w, t.h);
       ctx.restore();
 
-      const emphasised = this.hover === t || this.drag?.t === t || pinned === t || this.selected.has(t);
+      const emphasised = this.hover === t || this.drag?.t === t || pinned === t || this.selected.has(t) || onPinnedEdge;
       if (emphasised) {
         ctx.strokeStyle = theme.edgeHi;
-        ctx.lineWidth = (pinned === t || this.selected.has(t) ? 2.5 : 2) / cam.scale;
+        ctx.lineWidth = (pinned === t || this.selected.has(t) || onPinnedEdge ? 2.5 : 2) / cam.scale;
         roundRectPath(ctx, t.x, t.y, t.w, t.h, 10);
         ctx.stroke();
       }
@@ -225,8 +275,16 @@ export class Diagram {
     // "+ add column" affordance under the pinned table (SQL only)
     if (pinned && Number.isFinite(pinned.x) && this.editable) this._drawAddButton(pinned);
 
+    this._drawLinkedColumns();
+    this._drawSearchMark();
+
+    // group names above the edges and tables
+    for (const a of this.annotations) if (a.type === 'group') this._drawGroupLabel(a, cull);
+
     // sticky notes on top of tables
     for (const a of this.annotations) if (a.type === 'note') this._drawNote(a, cull);
+
+    this._drawEdgeHandle();
 
     // selection chrome (handles, colour dots, delete) for the selected annotation
     if (this.selectedAnno) this._drawAnnoChrome(this.selectedAnno);
@@ -288,7 +346,7 @@ export class Diagram {
   _drawGroup(a, cull) {
     if (!this._annoVisible(a, cull)) return;
     const { ctx, cam } = this;
-    const color = GROUP_COLORS[a.color] || GROUP_COLORS.blue;
+    const color = groupColor(a.color);
     ctx.save();
     roundRectPath(ctx, a.x, a.y, a.w, a.h, 12);
     ctx.fillStyle = hexA(color, 0.08);
@@ -296,15 +354,20 @@ export class Diagram {
     ctx.strokeStyle = hexA(color, 0.7);
     ctx.lineWidth = 1.5 / cam.scale;
     ctx.stroke();
-    // label in the header strip
-    if (a.text) {
-      ctx.fillStyle = color;
-      ctx.font = `600 ${13 / cam.scale}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      const pad = 10 / cam.scale;
-      ctx.fillText(clip(ctx, a.text, a.w - pad * 2), a.x + pad, a.y + 16 / cam.scale);
-    }
+    ctx.restore();
+  }
+
+  // Drawn after the edges and tables so the name is never covered by them.
+  _drawGroupLabel(a, cull) {
+    if (!a.text || !this._annoVisible(a, cull)) return;
+    const { ctx, cam } = this;
+    ctx.save();
+    ctx.fillStyle = groupColor(a.color);
+    ctx.font = `600 ${13 / cam.scale}px ${GROUP_LABEL_FAMILY}`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    const pad = 10 / cam.scale;
+    ctx.fillText(clip(ctx, a.text, a.w - pad * 2), a.x + pad, a.y + 16 / cam.scale);
     ctx.restore();
   }
 
@@ -364,6 +427,28 @@ export class Diagram {
       ctx.fill();
       if (d.active) { ctx.strokeStyle = this.theme.edgeHi; ctx.lineWidth = 2 / s; ctx.stroke(); }
     }
+    if (dots.custom) {
+      const d = dots.custom;
+      if (d.active) {                                // the chosen colour, ringed like the other dots
+        ctx.beginPath();
+        ctx.arc(d.cx, d.cy, d.r, 0, Math.PI * 2);
+        ctx.fillStyle = d.fill;
+        ctx.fill();
+        ctx.strokeStyle = this.theme.edgeHi;
+        ctx.lineWidth = 2 / s;
+        ctx.stroke();
+      } else {                                       // a colour wheel: "any colour"
+        const hues = 12;
+        for (let i = 0; i < hues; i++) {
+          ctx.beginPath();
+          ctx.moveTo(d.cx, d.cy);
+          ctx.arc(d.cx, d.cy, d.r, (i / hues) * Math.PI * 2, ((i + 1) / hues) * Math.PI * 2 + 0.02);
+          ctx.closePath();
+          ctx.fillStyle = `hsl(${(i * 360) / hues}, 80%, 60%)`;
+          ctx.fill();
+        }
+      }
+    }
     const del = dots.delete;
     ctx.beginPath();
     ctx.arc(del.cx, del.cy, del.r, 0, Math.PI * 2);
@@ -390,10 +475,14 @@ export class Diagram {
       fill: a.type === 'group' ? GROUP_COLORS[key] : NOTE_COLORS[key].fill,
       active: a.color === key,
     }));
+    // groups get a fifth dot that opens a picker for any colour
+    const custom = a.type === 'group'
+      ? { cx: a.x + r + order.length * gap, cy: y, r, active: isHexColor(a.color), fill: groupColor(a.color) }
+      : null;
     const del = { cx: a.x + a.w - r, cy: y, r };
     const hs = 9 / s;
     const resize = { x: a.x + a.w - hs, y: a.y + a.h - hs, w: hs, h: hs };
-    return { colors, delete: del, resize };
+    return { colors, custom, delete: del, resize };
   }
 
   // ---- annotation API ----
@@ -424,11 +513,6 @@ export class Diagram {
     this.onLayoutChange?.();
   }
 
-  // topmost note, then group (notes render above groups)
-  _annoAt(sx, sy) {
-    return this._noteAt(sx, sy) || this._groupAt(sx, sy);
-  }
-
   _noteAt(sx, sy) {
     const w = this.screenToWorld(sx, sy);
     for (let i = this.annotations.length - 1; i >= 0; i--) {
@@ -438,13 +522,31 @@ export class Diagram {
     return null;
   }
 
-  _groupAt(sx, sy) {
-    const w = this.screenToWorld(sx, sy);
+  // The group whose name is under the cursor. Names keep their on-screen size,
+  // so this is measured in screen pixels.
+  _groupLabelAt(sx, sy) {
+    const { ctx, cam } = this;
+    ctx.save();
+    ctx.font = GROUP_LABEL_FONT;
     for (let i = this.annotations.length - 1; i >= 0; i--) {
       const a = this.annotations[i];
-      if (a.type === 'group' && inside(w, a)) return a;
+      if (a.type !== 'group') continue;
+      const left = a.x * cam.scale + cam.x;
+      const top = a.y * cam.scale + cam.y;
+      const width = Math.min(a.w * cam.scale, Math.max(GROUP_LABEL_MIN_W, ctx.measureText(a.text || '').width + 20));
+      if (sx >= left && sx <= left + width && sy >= top && sy <= top + GROUP_LABEL_H) {
+        ctx.restore();
+        return a;
+      }
     }
+    ctx.restore();
     return null;
+  }
+
+  // The tables that belong to a group: those whose centre is inside its box.
+  _tablesInGroup(a) {
+    return this.model.tables.filter((t) => Number.isFinite(t.x)
+      && inside({ x: t.x + t.w / 2, y: t.y + t.h / 2 }, a));
   }
 
   // select an annotation, bring it to front and start dragging it
@@ -454,7 +556,10 @@ export class Diagram {
     this.pinned = null; this.pinnedKeys = null;
     const ai = this.annotations.indexOf(a);
     this.annotations.splice(ai, 1); this.annotations.push(a);
-    this.annoDrag = { a, dx: w.x - a.x, dy: w.y - a.y, moved: false };
+    const tables = a.type === 'group'
+      ? this._tablesInGroup(a).map((t) => ({ t, x0: t.x, y0: t.y }))
+      : [];
+    this.annoDrag = { a, dx: w.x - a.x, dy: w.y - a.y, x0: a.x, y0: a.y, tables, moved: false };
     this.markDirty();
   }
 
@@ -467,6 +572,8 @@ export class Diagram {
     for (const d of rects.colors) {
       if ((w.x - d.cx) ** 2 + (w.y - d.cy) ** 2 <= (d.r * 1.4) ** 2) return { kind: 'color', value: d.key };
     }
+    const custom = rects.custom;
+    if (custom && (w.x - custom.cx) ** 2 + (w.y - custom.cy) ** 2 <= (custom.r * 1.4) ** 2) return { kind: 'custom' };
     const del = rects.delete;
     if ((w.x - del.cx) ** 2 + (w.y - del.cy) ** 2 <= (del.r * 1.4) ** 2) return { kind: 'delete' };
     const rz = rects.resize;
@@ -563,55 +670,350 @@ export class Diagram {
   }
 
   // bezier segment between two table columns (or null if not drawable / off-screen)
-  _edgeSeg(fromKey, fromCol, toKey, toCol, cull) {
+  // FK relations + user-defined manual links (latter drawn dashed).
+  // FK relations carry crow's-foot cardinality; manual links stay neutral.
+  _routes() {
     const byKey = this._tableMap();
-    const from = byKey.get(fromKey), to = byKey.get(toKey);
-    if (!from || !to || !Number.isFinite(from.x) || !Number.isFinite(to.x)) return null;
-    if (this.hidden.has(from.key) || this.hidden.has(to.key)) return null;
-    const fy = from.y + columnY(from, fromCol);
-    const ty = to.y + columnY(to, toCol);
-    const fromRight = (from.x + from.w / 2) < (to.x + to.w / 2);
-    const fx = fromRight ? from.x + from.w : from.x;
-    const tx = fromRight ? to.x : to.x + to.w;
-    if (cull) {
-      const minX = Math.min(fx, tx), maxX = Math.max(fx, tx);
-      const minY = Math.min(fy, ty), maxY = Math.max(fy, ty);
-      if (maxX < cull.x0 || minX > cull.x1 || maxY < cull.y0 || minY > cull.y1) return null;
+    const edges = [];
+    for (const r of this.model.relations) {
+      edges.push({
+        fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(),
+        fromCol: r.fromCols[0], toCol: r.toCols[0],
+        manual: false, card: relationCardinality(r, byKey),
+      });
     }
-    const dx = Math.max(28, Math.abs(tx - fx) * 0.4);
-    return { fx, fy, tx, ty, c1x: fx + (fromRight ? dx : -dx), c2x: tx + (fromRight ? -dx : dx), fromKey, toKey };
+    for (const l of this.manualLinks) {
+      edges.push({
+        fromKey: l.from.table, toKey: l.to.table,
+        fromCol: l.from.col, toCol: l.to.col,
+        manual: true, card: null, link: l,
+      });
+    }
+    const routes = routeEdges(edges, byKey, (key) => this.hidden.has(key), this.edgeBends, this.edgeAnchors);
+    // a straight path from "Arrange lines straight" replaces the curve while it
+    // still fits its tables (moving a table turns its lines back into curves)
+    for (const seg of routes) {
+      const path = this.edgePaths[seg.id];
+      if (!path || !pathFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) continue;
+      const first = path.points[0], last = path.points[path.points.length - 1];
+      const facing = { right: 1, bottom: 1, left: -1, top: -1 };
+      Object.assign(seg, {
+        path: path.points,
+        fx: first[0], fy: first[1], tx: last[0], ty: last[1],
+        fromSide: path.fromSide, toSide: path.toSide,
+        fromDir: facing[path.fromSide], toDir: facing[path.toSide],
+        fromVertical: path.fromSide === 'top' || path.fromSide === 'bottom',
+        toVertical: path.toSide === 'top' || path.toSide === 'bottom',
+      });
+    }
+    return routes;
+  }
+
+  setEdgePaths(paths) {
+    this.edgePaths = {};
+    const sides = ['left', 'right', 'top', 'bottom'];
+    for (const [id, p] of Object.entries(paths || {})) {
+      const ok = Array.isArray(p?.points) && p.points.length >= 2
+        && p.points.every((pt) => Array.isArray(pt) && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+        && sides.includes(p.fromSide) && sides.includes(p.toSide);
+      if (ok) this.edgePaths[id] = { points: p.points.map(([x, y]) => [x, y]), fromSide: p.fromSide, toSide: p.toSide };
+    }
+    this.markDirty();
+  }
+
+  // Arrange lines straight: route every line as horizontal and vertical
+  // segments around the tables (in a background worker), then show them.
+  arrangeLinesStraight() {
+    const tables = this.model.tables
+      .filter((t) => Number.isFinite(t.x))
+      .map((t) => ({ key: t.key, x: t.x, y: t.y, w: t.w, h: t.h }));
+    const edges = [];
+    for (const r of this.model.relations) {
+      const e = { fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(), fromCol: r.fromCols[0], toCol: r.toCols[0] };
+      edges.push({ ...e, id: `${e.fromKey}.${e.fromCol}>${e.toKey}.${e.toCol}` });
+    }
+    for (const l of this.manualLinks) {
+      edges.push({ fromKey: l.from.table, toKey: l.to.table, id: `${l.from.table}.${l.from.col}>${l.to.table}.${l.to.col}` });
+    }
+    const anchors = {};
+    for (const [id, ends] of Object.entries(this.edgeAnchors)) {
+      const hand = {};
+      if (ends.from && !ends.from.arranged) hand.from = ends.from;
+      if (ends.to && !ends.to.arranged) hand.to = ends.to;
+      if (hand.from || hand.to) anchors[id] = hand;
+    }
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
+      worker.onmessage = (event) => {
+        worker.terminate();
+        const { paths, failed, overlapping, ms } = event.data;
+        this.edgePaths = paths;
+        this.pinnedEdge = null;
+        this.markDirty();
+        this.onLayoutChange?.();
+        resolve({ routed: Object.keys(paths).length, failed: failed.length, sharing: overlapping.length, ms });
+      };
+      worker.onerror = (err) => { worker.terminate(); reject(err); };
+      worker.postMessage({ tables, edges, anchors, hidden: [...this.hidden] });
+    });
+  }
+
+  clearEdgePaths() {
+    if (!Object.keys(this.edgePaths).length) return;
+    this.edgePaths = {};
+    this.markDirty();
+  }
+
+  setEdgeBends(bends) {
+    this.edgeBends = {};
+    for (const [id, bend] of Object.entries(bends || {})) {
+      if (!Number.isFinite(bend?.x) || !Number.isFinite(bend?.y)) continue;
+      this.edgeBends[id] = bend.arranged ? { x: bend.x, y: bend.y, arranged: true } : { x: bend.x, y: bend.y };
+    }
+    this.markDirty();
+  }
+
+  // Arrange lines: choose every line's sides, entry points and bend so lines
+  // avoid tables and each other. Lines the user placed or bent by hand keep
+  // that; lines from an earlier arrange are arranged again.
+  arrangeAllLines() {
+    const byKey = this._tableMap();
+    const edges = [];
+    for (const r of this.model.relations) {
+      edges.push({ fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(), fromCol: r.fromCols[0], toCol: r.toCols[0] });
+    }
+    for (const l of this.manualLinks) {
+      edges.push({ fromKey: l.from.table, toKey: l.to.table, fromCol: l.from.col, toCol: l.to.col });
+    }
+    // keep only what the user placed by hand, end by end
+    const keepAnchors = {};
+    for (const [id, ends] of Object.entries(this.edgeAnchors)) {
+      const hand = {};
+      if (ends.from && !ends.from.arranged) hand.from = ends.from;
+      if (ends.to && !ends.to.arranged) hand.to = ends.to;
+      if (hand.from || hand.to) keepAnchors[id] = hand;
+    }
+    const keepBends = Object.fromEntries(Object.entries(this.edgeBends).filter(([, b]) => !b.arranged));
+    const result = arrangeLines(edges, byKey, { keepAnchors, keepBends, isHidden: (k) => this.hidden.has(k) });
+    this.edgeAnchors = { ...result.anchors, ...keepAnchors };
+    this.edgeBends = { ...result.bends, ...keepBends };
+    this.edgePaths = {};                           // curved lines replace straight ones
+    this.pinnedEdge = null;
+    this.markDirty();
+    this.onLayoutChange?.();
+    return { arranged: result.arranged, keptByHand: Object.keys(keepAnchors).length };
+  }
+
+  // Brings a search result into view: centres on the table (or the column's row),
+  // zooms in if it would be too small to read, and marks the column.
+  focusSearchResult(key, column = null) {
+    const t = this._tableMap().get(key);
+    if (!t || !Number.isFinite(t.x)) return false;
+    if (this.hidden.has(key)) this.setTableHidden(key, false);
+    const scale = Math.max(this.cam.scale, SEARCH_MIN_SCALE);
+    const y = column ? t.y + columnY(t, column) : t.y + t.h / 2;
+    this.cam = { x: this.viewW / 2 - (t.x + t.w / 2) * scale, y: this.viewH / 2 - y * scale, scale };
+    this._setPin(t);
+    this.searchMark = { key, column };
+    this.markDirty();
+    this.onZoom?.(scale);
+    return true;
+  }
+
+  clearSearchMark() {
+    if (!this.searchMark) return;
+    this.searchMark = null;
+    this.markDirty();
+  }
+
+  _drawSearchMark() {
+    const mark = this.searchMark;
+    if (!mark?.column) return;
+    const t = this._tableMap().get(mark.key);
+    if (!t || !Number.isFinite(t.x) || this.hidden.has(t.key)) return;
+    const { ctx, cam } = this;
+    const top = t.y + columnY(t, mark.column) - ROW_H / 2;
+    ctx.save();
+    ctx.fillStyle = SEARCH_MARK_COLOR;
+    ctx.globalAlpha = 0.28;
+    ctx.fillRect(t.x + 1, top, t.w - 2, ROW_H);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = SEARCH_MARK_COLOR;
+    ctx.lineWidth = 2 / cam.scale;
+    ctx.strokeRect(t.x + 1, top, t.w - 2, ROW_H);
+    ctx.restore();
+  }
+
+  setEdgeAnchors(anchors) {
+    this.edgeAnchors = {};
+    const valid = (a) => ['left', 'right', 'top', 'bottom'].includes(a?.side) && Number.isFinite(a?.t);
+    const copy = (a) => (a.arranged ? { side: a.side, t: a.t, arranged: true } : { side: a.side, t: a.t });
+    for (const [id, ends] of Object.entries(anchors || {})) {
+      const kept = {};
+      if (valid(ends?.from)) kept.from = copy(ends.from);
+      if (valid(ends?.to)) kept.to = copy(ends.to);
+      if (kept.from || kept.to) this.edgeAnchors[id] = kept;
+    }
+    this.markDirty();
+  }
+
+  _clearEdgeAnchor(id, end) {
+    const ends = this.edgeAnchors[id];
+    if (!ends) return;
+    delete ends[end];
+    if (!ends.from && !ends.to) delete this.edgeAnchors[id];
+  }
+
+  // Which end of the clicked line has its handle at the point.
+  _edgeEndAt(sx, sy) {
+    const seg = this._pinnedRoute();
+    if (!seg) return null;
+    const { scale, x: camX, y: camY } = this.cam;
+    const near = (wx, wy) => Math.hypot(sx - (wx * scale + camX), sy - (wy * scale + camY)) <= EDGE_END_HIT;
+    if (near(seg.fx, seg.fy)) return { seg, end: 'from', tableKey: seg.fromKey };
+    if (near(seg.tx, seg.ty)) return { seg, end: 'to', tableKey: seg.toKey };
+    return null;
+  }
+
+  _pinnedRoute() {
+    return this.pinnedEdge ? this.highlightedRoutes.find(seg => seg.id === this.pinnedEdge.id) ?? null : null;
+  }
+
+  // The clicked line, when the point is on its bend handle.
+  _edgeHandleAt(sx, sy) {
+    const seg = this._pinnedRoute();
+    if (!seg || seg.path) return null;                // straight lines have no bend handle
+    const { x, y } = edgeMidpoint(seg);
+    const hx = x * this.cam.scale + this.cam.x;
+    const hy = y * this.cam.scale + this.cam.y;
+    return Math.hypot(sx - hx, sy - hy) <= EDGE_HANDLE_HIT ? seg : null;
+  }
+
+  // The clicked manual link, when the point is on its delete button.
+  _edgeDeleteAt(sx, sy) {
+    const seg = this._pinnedRoute();
+    if (!seg?.manual) return null;
+    const { x, y } = routeMidpoint(seg);
+    const bx = x * this.cam.scale + this.cam.x + EDGE_DELETE_OFFSET;
+    const by = y * this.cam.scale + this.cam.y;
+    return Math.hypot(sx - bx, sy - by) <= EDGE_DELETE_R + 2 ? seg : null;
+  }
+
+  _drawEdgeHandle() {
+    const seg = this._pinnedRoute();
+    if (!seg) return;
+    const { ctx, cam, theme } = this;
+    const s = 1 / cam.scale;
+    const { x, y } = routeMidpoint(seg);
+    ctx.save();
+    for (const [ex, ey, pinned] of [[seg.fx, seg.fy, seg.fromPinned], [seg.tx, seg.ty, seg.toPinned]]) {
+      ctx.beginPath();
+      ctx.arc(ex, ey, EDGE_END_R * s, 0, Math.PI * 2);
+      ctx.fillStyle = pinned ? theme.edgeHi : theme.tableBg;    // filled once moved by hand
+      ctx.fill();
+      ctx.lineWidth = 2 * s;
+      ctx.strokeStyle = pinned ? theme.tableBg : theme.edgeHi;
+      ctx.stroke();
+    }
+    if (!seg.path) {                                 // bend handle, for curved lines
+      ctx.beginPath();
+      ctx.arc(x, y, EDGE_HANDLE_R * s, 0, Math.PI * 2);
+      ctx.fillStyle = theme.edgeHi;
+      ctx.fill();
+      ctx.lineWidth = 2 * s;
+      ctx.strokeStyle = theme.tableBg;
+      ctx.stroke();
+    }
+    ctx.lineWidth = 2 * s;
+    ctx.strokeStyle = theme.tableBg;
+
+    if (seg.manual) {
+      const bx = x + EDGE_DELETE_OFFSET * s;
+      const arm = 3.5 * s;
+      ctx.beginPath();
+      ctx.arc(bx, y, EDGE_DELETE_R * s, 0, Math.PI * 2);
+      ctx.fillStyle = EDGE_DELETE_COLOR;
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(bx - arm, y - arm); ctx.lineTo(bx + arm, y + arm);
+      ctx.moveTo(bx + arm, y - arm); ctx.lineTo(bx - arm, y + arm);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.6 * s;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   _drawEdges(vx0, vy0, vx1, vy1) {
     const { theme } = this;
-    const cull = { x0: vx0, y0: vy0, x1: vx1, y1: vy1 };
-    const focus = this.focus;
+    const routes = this._routes();
+    // where straight lines cross, the horizontal one jumps over the other
+    const straight = routes.filter((seg) => seg.path).map((seg) => ({ id: seg.id, points: seg.path }));
+    this._jumps = straight.length ? pathJumps(straight, JUMP_RADIUS + 1) : null;
+    if (this.pinnedEdge && !routes.some(seg => seg.id === this.pinnedEdge.id)) this.pinnedEdge = null;
+
+    const pinnedEdgeId = this.pinnedEdge?.id ?? null;
+    const focus = pinnedEdgeId ? null : this.focus;
     const focusKey = focus ? focus.key : null;
-    const fadeAlpha = this.pinned ? 0.05 : 0.16;   // pinned fades harder than transient hover
+    const hoverEdge = pinnedEdgeId ?? (focusKey ? null : this.hoverEdge);
+    const fadeAlpha = this.pinned || pinnedEdgeId ? 0.05 : 0.16;   // pinned fades harder than transient hover
     const highlighted = [];
 
-    // FK relations + user-defined manual links (latter drawn dashed).
-    // FK relations carry crow's-foot cardinality; manual links stay neutral.
-    const byKey = this._tableMap();
-    const edges = [];
-    for (const r of this.model.relations) edges.push({ fk: r.fromTable.toLowerCase(), tk: r.toTable.toLowerCase(), fc: r.fromCols[0], tc: r.toCols[0], manual: false, card: relationCardinality(r, byKey) });
-    for (const l of this.manualLinks) edges.push({ fk: l.from.table, tk: l.to.table, fc: l.from.col, tc: l.to.col, manual: true, card: null });
-
-    for (const e of edges) {
-      const seg = this._edgeSeg(e.fk, e.fc, e.tk, e.tc, cull);
-      if (!seg) continue;
-      seg.manual = e.manual;
-      seg.card = e.card;
-      const connected = focusKey && (seg.fromKey === focusKey || seg.toKey === focusKey);
-      if (focusKey) {
-        if (connected) { highlighted.push(seg); continue; }
-        this._stroke(seg, theme.edge, 1.2, fadeAlpha, e.manual);
+    for (const seg of routes) {
+      const xs = seg.path ? seg.path.map((p) => p[0]) : [seg.fx, seg.c1x, seg.c2x, seg.tx];
+      const ys = seg.path ? seg.path.map((p) => p[1]) : [seg.fy, seg.c1y, seg.c2y, seg.ty];
+      if (Math.max(...xs) < vx0 || Math.min(...xs) > vx1 || Math.max(...ys) < vy0 || Math.min(...ys) > vy1) continue;
+      const connected = focusKey
+        ? seg.fromKey === focusKey || seg.toKey === focusKey
+        : seg.id === hoverEdge;
+      if (connected) {
+        highlighted.push(seg);
+      } else if (focusKey || hoverEdge) {
+        this._stroke(seg, theme.edge, 1.2, fadeAlpha, seg.manual);
       } else {
-        this._stroke(seg, theme.edge, 1.5, 0.5, e.manual);
+        this._stroke(seg, theme.edge, 1.5, 0.5, seg.manual);
       }
     }
     for (const seg of highlighted) this._stroke(seg, theme.edgeHi, 2.2, 1, seg.manual);
     for (const seg of highlighted) this._drawEdgeLabel(seg);   // words, on top of the lines
+    this.highlightedRoutes = highlighted;
+  }
+
+  // Marks the exact columns a highlighted line joins, since a line entering
+  // through a top or bottom edge can't point at a row.
+  _drawLinkedColumns() {
+    const { ctx, theme } = this;
+    const byKey = this._tableMap();
+    const mark = (key, column) => {
+      const t = byKey.get(key);
+      if (!t || !column || !t.columns.some(c => c.name.toLowerCase() === String(column).toLowerCase())) return;
+      ctx.fillRect(t.x + 1, t.y + columnY(t, column) - ROW_H / 2, t.w - 2, ROW_H);
+    };
+    ctx.save();
+    ctx.fillStyle = theme.edgeHi;
+    ctx.globalAlpha = 0.22;
+    for (const seg of this.highlightedRoutes) {
+      mark(seg.fromKey, seg.fromCol);
+      mark(seg.toKey, seg.toCol);
+    }
+    ctx.restore();
+  }
+
+  // The line closest to the cursor, within reach, or null.
+  _edgeAt(sx, sy) {
+    const w = this.screenToWorld(sx, sy);
+    const tol = EDGE_HIT / this.cam.scale;
+    let nearest = null;
+    let nearestDistance = tol;
+    for (const seg of this._routes()) {
+      const distance = segDistance(seg, w.x, w.y);
+      if (distance <= nearestDistance) {
+        nearest = seg;
+        nearestDistance = distance;
+      }
+    }
+    return nearest;
   }
 
   _stroke(seg, color, width, alpha, dashed) {
@@ -622,16 +1024,20 @@ export class Diagram {
     ctx.lineWidth = width / cam.scale;
     if (dashed) ctx.setLineDash([6 / cam.scale, 5 / cam.scale]);
     ctx.beginPath();
-    ctx.moveTo(seg.fx, seg.fy);
-    ctx.bezierCurveTo(seg.c1x, seg.fy, seg.c2x, seg.ty, seg.tx, seg.ty);
+    if (seg.path) {
+      tracePath(ctx, seg.path, this._jumps?.[seg.id]);
+    } else {
+      ctx.moveTo(seg.fx, seg.fy);
+      ctx.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.tx, seg.ty);
+    }
     ctx.stroke();
     if (dashed) ctx.setLineDash([]);
     if (seg.card) {
       // markers sit just outside each table, pointing along the line
       const s = 1 / cam.scale;
       const mw = Math.max(width, 1.4) / cam.scale;
-      drawMarker(ctx, seg.fx, seg.fy, Math.sign(seg.c1x - seg.fx) || 1, seg.card.from, s, mw);
-      drawMarker(ctx, seg.tx, seg.ty, Math.sign(seg.c2x - seg.tx) || 1, seg.card.to, s, mw);
+      drawMarker(ctx, seg.fx, seg.fy, seg.fromDir, seg.card.from, s, mw, seg.fromVertical);
+      drawMarker(ctx, seg.tx, seg.ty, seg.toDir, seg.card.to, s, mw, seg.toVertical);
     } else {
       dot(ctx, seg.fx, seg.fy, 3 / cam.scale);
       dot(ctx, seg.tx, seg.ty, 3 / cam.scale);
@@ -644,8 +1050,10 @@ export class Diagram {
     if (!seg.card || !seg.card.label) return;
     const { ctx, cam } = this;
     const s = 1 / cam.scale;
-    const mx = (seg.fx + 3 * seg.c1x + 3 * seg.c2x + seg.tx) / 8;
-    const my = (seg.fy + seg.ty) / 2;
+    const middle = routeMidpoint(seg);
+    const mx = middle.x;
+    // leave room for the bend handle on a clicked line
+    const my = middle.y - (seg.id === this.pinnedEdge?.id ? 24 * s : 0);
     ctx.save();
     ctx.font = `${11 * s}px ui-sans-serif, system-ui, sans-serif`;
     ctx.textAlign = 'center';
@@ -704,6 +1112,8 @@ export class Diagram {
       // idle hover (mouse only)
       const t = this.tableAt(sx, sy);
       if (t !== this.hover) { this.hover = t; this.markDirty(); }
+      const edgeId = t ? null : (this._edgeAt(sx, sy)?.id ?? null);
+      if (edgeId !== this.hoverEdge) { this.hoverEdge = edgeId; this.markDirty(); }
       // connector dots on the hovered column row
       let conn = null;
       if (t) {
@@ -715,8 +1125,11 @@ export class Diagram {
       if (changed) { this.hoverConn = conn; this.markDirty(); }
       if (this._connectorAt(sx, sy)) c.style.cursor = 'crosshair';
       else if (this._annoChromeAt(sx, sy) || this._addButtonAt(sx, sy)) c.style.cursor = 'pointer';
+      else if (this._edgeDeleteAt(sx, sy)) c.style.cursor = 'pointer';
+      else if (this._edgeHandleAt(sx, sy) || this._edgeEndAt(sx, sy) || this._noteAt(sx, sy)) c.style.cursor = 'grab';
+      else if (this._groupLabelAt(sx, sy)) c.style.cursor = 'move';
       else if (t) c.style.cursor = 'grab';
-      else if (this._noteAt(sx, sy) || this._groupAt(sx, sy)) c.style.cursor = 'grab';
+      else if (edgeId) c.style.cursor = 'pointer';
       else c.style.cursor = 'default';
     });
 
@@ -739,7 +1152,7 @@ export class Diagram {
         tap = { sx: p.sx, sy: p.sy, moved: false };
         this._pointerDown(p.sx, p.sy, false, false);
       } else if (e.touches.length === 2) {
-        this.drag = this.pan = this.annoDrag = this.annoResize = null;   // cancel single-finger
+        this.drag = this.pan = this.annoDrag = this.annoResize = this.edgeDrag = this.edgeEndDrag = null;   // cancel single-finger
         tap = null;
         const a = tpos(e.touches[0]), b = tpos(e.touches[1]);
         pinch = { dist: Math.hypot(a.sx - b.sx, a.sy - b.sy) || 1, mx: (a.sx + b.sx) / 2, my: (a.sy + b.sy) / 2 };
@@ -818,11 +1231,37 @@ export class Diagram {
   // `additive` (Shift) drives multi-select: Shift+click toggles a table,
   // Shift+drag on empty draws a marquee box.
   _pointerDown(sx, sy, additive = false, allowConnect = true) {
+    this.pressEdge = null;
+    // 0) the delete button and bend handle of the clicked line
+    const deleteSeg = this._edgeDeleteAt(sx, sy);
+    if (deleteSeg) { this.removeManualLink(deleteSeg.link); return; }
+    const handleSeg = this._edgeHandleAt(sx, sy);
+    if (handleSeg) {
+      const w = this.screenToWorld(sx, sy);
+      const middle = edgeMidpoint(handleSeg);
+      this.edgeDrag = {
+        id: handleSeg.id,
+        baseX: middle.x - handleSeg.bendX,
+        baseY: middle.y - handleSeg.bendY,
+        grabX: w.x - middle.x,
+        grabY: w.y - middle.y,
+        moved: false,
+      };
+      return;
+    }
+    const endHit = this._edgeEndAt(sx, sy);
+    if (endHit) {
+      // moving an end by hand turns a straight line back into a curve
+      delete this.edgePaths[endHit.seg.id];
+      this.edgeEndDrag = { id: endHit.seg.id, end: endHit.end, tableKey: endHit.tableKey, moved: false };
+      return;
+    }
     // 1) chrome of the selected annotation (colour dots / delete / resize)
     const chrome = this._annoChromeAt(sx, sy);
     if (chrome) {
       const a = this.selectedAnno;
       if (chrome.kind === 'color') { a.color = chrome.value; this.markDirty(); this.onLayoutChange?.(); }
+      else if (chrome.kind === 'custom') { this.onPickColor?.(a, sx, sy); }
       else if (chrome.kind === 'delete') { this.deleteSelectedAnnotation(); }
       else if (chrome.kind === 'resize') {
         const w = this.screenToWorld(sx, sy);
@@ -844,7 +1283,13 @@ export class Diagram {
     // 3) a sticky note (notes sit on top, grabbable anywhere)
     const note = this._noteAt(sx, sy);
     if (note) { this._grabAnno(note, sx, sy); return; }
-    // 4) a table (before groups, so tables inside a group stay grabbable)
+    // 3b) a group's name is the only handle that moves the group, and it is
+    // drawn above the tables, so it is checked first
+    if (!additive) {
+      const groupLabel = this._groupLabelAt(sx, sy);
+      if (groupLabel) { this._grabAnno(groupLabel, sx, sy); return; }
+    }
+    // 4) a table
     const t = this.tableAt(sx, sy);
     if (t) {
       if (this.selectedAnno) this.selectedAnno = null;
@@ -873,10 +1318,17 @@ export class Diagram {
       this.markDirty();
       return;
     }
-    // 5) a group box (grabbable anywhere that isn't a table)
-    const group = this._groupAt(sx, sy);
-    if (group) { this._grabAnno(group, sx, sy); return; }
-    // 6) empty space -> Shift+drag marquee-selects; otherwise pan
+    // 4b) a relation line: a click pins it, a drag pans
+    if (!additive) {
+      const edge = this._edgeAt(sx, sy);
+      if (edge) {
+        if (this.selectedAnno) { this.selectedAnno = null; this.markDirty(); }
+        this.pressEdge = edge;
+        this.pan = { sx, sy, camx: this.cam.x, camy: this.cam.y, moved: false };
+        return;
+      }
+    }
+    // 5) empty space or a group's body -> Shift+drag marquee-selects; otherwise pan
     if (this.selectedAnno) { this.selectedAnno = null; this.markDirty(); }
     const w = this.screenToWorld(sx, sy);
     if (additive) {
@@ -901,6 +1353,25 @@ export class Diagram {
 
   // returns true if an active drag/pan/resize consumed the move
   _pointerMove(sx, sy) {
+    if (this.edgeEndDrag) {
+      const drag = this.edgeEndDrag;
+      const table = this._tableMap().get(drag.tableKey);
+      if (table) {
+        const w = this.screenToWorld(sx, sy);
+        this.edgeAnchors[drag.id] = { ...this.edgeAnchors[drag.id], [drag.end]: anchorForPoint(table, w.x, w.y) };
+        drag.moved = true;
+        this.markDirty();
+      }
+      return true;
+    }
+    if (this.edgeDrag) {
+      const w = this.screenToWorld(sx, sy);
+      const drag = this.edgeDrag;
+      this.edgeBends[drag.id] = { x: w.x - drag.grabX - drag.baseX, y: w.y - drag.grabY - drag.baseY };
+      drag.moved = true;
+      this.markDirty();
+      return true;
+    }
     if (this.linking) {
       const w = this.screenToWorld(sx, sy);
       this.linking.cx = w.x; this.linking.cy = w.y;
@@ -934,6 +1405,12 @@ export class Diagram {
       const w = this.screenToWorld(sx, sy);
       this.annoDrag.a.x = w.x - this.annoDrag.dx;
       this.annoDrag.a.y = w.y - this.annoDrag.dy;
+      const moveX = this.annoDrag.a.x - this.annoDrag.x0;
+      const moveY = this.annoDrag.a.y - this.annoDrag.y0;
+      for (const item of this.annoDrag.tables) {
+        item.t.x = item.x0 + moveX;
+        item.t.y = item.y0 + moveY;
+      }
       this.annoDrag.moved = true;
       this.markDirty();
       return true;
@@ -957,6 +1434,18 @@ export class Diagram {
   }
 
   _pointerUp() {
+    if (this.edgeEndDrag) {
+      const moved = this.edgeEndDrag.moved;
+      this.edgeEndDrag = null;
+      if (moved) this.onLayoutChange?.();
+      return;
+    }
+    if (this.edgeDrag) {
+      const moved = this.edgeDrag.moved;
+      this.edgeDrag = null;
+      if (moved) this.onLayoutChange?.();
+      return;
+    }
     // finishing a link drag -> create the link if dropped on a column
     if (this.linking) {
       const k = this.linking;
@@ -989,12 +1478,19 @@ export class Diagram {
       this.dragGroup = null;
       return;
     }
-    // a click (no drag) on a table pins focus; a click on empty space clears it
+    // a click (no drag) on a table or line pins focus; a click elsewhere clears it
     if (this.drag && !this.drag.moved) this._pin(this.drag.t);
     else if (this.pan && !this.pan.moved) {
       if (this.selected.size) { this.selected = new Set(); this.markDirty(); this.onSelectionChange?.(); }
-      if (this.pinned) this._pin(this.pinned);
+      if (this.pressEdge) this._pinEdge(this.pressEdge);
+      else {
+        if (this.pinned) this._pin(this.pinned);
+        this._clearPinnedEdge();
+      }
+    } else if (this.annoDrag && !this.annoDrag.moved) {
+      this._clearPinnedEdge();
     }
+    this.pressEdge = null;
     const changed = (this.drag && this.drag.moved) || (this.pan && this.pan.moved) ||
                     (this.annoDrag && this.annoDrag.moved) || (this.annoResize && this.annoResize.moved);
     this.drag = null;
@@ -1126,7 +1622,7 @@ export class Diagram {
   }
 
   addManualLink(fk, fc, tk, tc) {
-    if (fk === tk && fc.toLowerCase() === tc.toLowerCase()) return false;
+    if (fk === tk) return false;                  // a drag within one table is a slip, not a relation
     if (this._linkExists(fk, fc, tk, tc)) return false;
     this.manualLinks.push({ from: { table: fk, col: fc }, to: { table: tk, col: tc } });
     this.markDirty();
@@ -1143,16 +1639,8 @@ export class Diagram {
   linkAt(sx, sy) {
     const w = this.screenToWorld(sx, sy);
     const tol = 7 / this.cam.scale;
-    for (const l of this.manualLinks) {
-      const seg = this._edgeSeg(l.from.table, l.from.col, l.to.table, l.to.col, null);
-      if (!seg) continue;
-      // sample the bezier
-      for (let i = 0; i <= 16; i++) {
-        const u = i / 16, iu = 1 - u;
-        const bx = iu * iu * iu * seg.fx + 3 * iu * iu * u * seg.c1x + 3 * iu * u * u * seg.c2x + u * u * u * seg.tx;
-        const by = iu * iu * iu * seg.fy + 3 * iu * iu * u * seg.fy + 3 * iu * u * u * seg.ty + u * u * u * seg.ty;
-        if (Math.hypot(w.x - bx, w.y - by) <= tol) return l;
-      }
+    for (const seg of this._routes()) {
+      if (seg.manual && segNear(seg, w.x, w.y, tol)) return seg.link;
     }
     return null;
   }
@@ -1161,8 +1649,26 @@ export class Diagram {
     const i = this.manualLinks.indexOf(link);
     if (i < 0) return;
     this.manualLinks.splice(i, 1);
+    const id = `${link.from.table}.${link.from.col}>${link.to.table}.${link.to.col}`;
+    delete this.edgeBends[id];
+    delete this.edgeAnchors[id];
+    delete this.edgePaths[id];
+    if (this.pinnedEdge?.id === id) this.pinnedEdge = null;
     this.markDirty();
     this.onLayoutChange?.();
+  }
+
+  // Manual links touching a table, for the table's right-click menu.
+  manualLinksOf(key) {
+    return this.manualLinks.filter(l => l.from.table === key || l.to.table === key);
+  }
+
+  // Removes the clicked line if it is a manual link. Returns whether it did.
+  removePinnedLink() {
+    const seg = this._pinnedRoute();
+    if (!seg?.manual) return false;
+    this.removeManualLink(seg.link);
+    return true;
   }
 
   clearManualLinks() {
@@ -1190,11 +1696,23 @@ export class Diagram {
 
   // edit whatever is under the point: annotation text, a table/column, else zoom in
   _editAt(sx, sy) {
-    const t = this.tableAt(sx, sy);
-    if (!t) {
-      const anno = this._annoAt(sx, sy);
-      if (anno) { this.selectedAnno = anno; this._beginEditAnnotation(anno); this.markDirty(); return; }
+    const bent = this._edgeHandleAt(sx, sy);
+    if (bent) {                                   // double-click the handle to straighten the line
+      delete this.edgeBends[bent.id];
+      this.markDirty();
+      this.onLayoutChange?.();
+      return;
     }
+    const endHit = this._edgeEndAt(sx, sy);
+    if (endHit) {                                 // double-click an end to make it automatic again
+      this._clearEdgeAnchor(endHit.seg.id, endHit.end);
+      this.markDirty();
+      this.onLayoutChange?.();
+      return;
+    }
+    const t = this.tableAt(sx, sy);
+    const anno = (!t && this._noteAt(sx, sy)) || this._groupLabelAt(sx, sy);
+    if (anno) { this.selectedAnno = anno; this._beginEditAnnotation(anno); this.markDirty(); return; }
     const target = this._editTargetAt(sx, sy);
     if (target) { this._beginEdit(target); return; }
     this._zoomAt(sx, sy, 1.6);
@@ -1383,6 +1901,7 @@ export class Diagram {
       if (!Number.isFinite(t.x) || this.hidden.has(t.key)) continue;
       ctx.drawImage(this._bitmap(t), t.x, t.y, t.w, t.h);
     }
+    for (const a of this.annotations) if (a.type === 'group') this._drawGroupLabel(a, all);
     for (const a of this.annotations) if (a.type === 'note') this._drawNote(a, all);
     this.ctx = saved;
     this.cam = savedCam;
@@ -1400,7 +1919,15 @@ function dot(ctx, x, y, r) {
 //   (x,y) = the point on the table edge; dir = +1 if the line extends in +x
 //   from here, -1 if -x. `s` = world-units-per-screen-pixel (1/scale).
 //   kind ∈ 'one' | 'many' | 'zero-or-one' | 'zero-or-many'. lw = line width.
-function drawMarker(ctx, x, y, dir, kind, s, lw) {
+function drawMarker(ctx, x, y, dir, kind, s, lw, vertical = false) {
+  if (vertical) {                                    // same marker, turned to face up or down
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.PI / 2);
+    drawMarker(ctx, 0, 0, dir, kind, s, lw);
+    ctx.restore();
+    return;
+  }
   const foot = 11 * s;     // distance from edge to crow's-foot apex / bar tick
   const spread = 5.5 * s;  // half-height of the foot / bar
   const r = 3.2 * s;       // optionality ("zero") ring radius
@@ -1425,6 +1952,59 @@ function drawMarker(ctx, x, y, dir, kind, s, lw) {
     ctx.stroke();
   }
 }
+// Distance from a point to a routed line, measured to the curve itself
+// (a fine polyline), so long lines have no gaps between sample points.
+function segDistance(seg, x, y) {
+  if (seg.path) return pathDistance(seg.path, x, y);
+  const pad = Math.max(Math.abs(seg.c1x - seg.fx), Math.abs(seg.c1y - seg.fy), 0);
+  const x0 = Math.min(seg.fx, seg.tx, seg.c1x, seg.c2x) - pad, x1 = Math.max(seg.fx, seg.tx, seg.c1x, seg.c2x) + pad;
+  const y0 = Math.min(seg.fy, seg.ty, seg.c1y, seg.c2y) - pad, y1 = Math.max(seg.fy, seg.ty, seg.c1y, seg.c2y) + pad;
+  if (x < x0 || x > x1 || y < y0 || y > y1) return Infinity;
+  let best = Infinity;
+  let px = seg.fx, py = seg.fy;
+  const steps = 48;
+  for (let i = 1; i <= steps; i++) {
+    const u = i / steps, iu = 1 - u;
+    const a = iu * iu * iu, b = 3 * iu * iu * u, c = 3 * iu * u * u, d = u * u * u;
+    const qx = a * seg.fx + b * seg.c1x + c * seg.c2x + d * seg.tx;
+    const qy = a * seg.fy + b * seg.c1y + c * seg.c2y + d * seg.ty;
+    const dx = qx - px, dy = qy - py;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 ? Math.max(0, Math.min(1, ((x - px) * dx + (y - py) * dy) / len2)) : 0;
+    best = Math.min(best, Math.hypot(x - (px + t * dx), y - (py + t * dy)));
+    px = qx; py = qy;
+  }
+  return best;
+}
+
+function segNear(seg, x, y, tol) {
+  return segDistance(seg, x, y) <= tol;
+}
+
+function routeMidpoint(seg) {
+  return seg.path ? pathMidpoint(seg.path) : edgeMidpoint(seg);
+}
+
+// Traces a straight path; jumps ([segmentIndex, x]) become small semicircles
+// over the line being crossed.
+function tracePath(ctx, points, jumps) {
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i++) {
+    const [x1, y1] = points[i - 1], [x2, y2] = points[i];
+    const here = jumps ? jumps.filter(([seg]) => seg === i).map(([, x]) => x) : [];
+    if (here.length && y1 === y2) {
+      const dir = Math.sign(x2 - x1);
+      here.sort((a, b) => (a - b) * dir);
+      for (const x of here) {
+        ctx.lineTo(x - dir * JUMP_RADIUS, y1);
+        if (dir > 0) ctx.arc(x, y1, JUMP_RADIUS, Math.PI, 0, false);
+        else ctx.arc(x, y1, JUMP_RADIUS, 0, Math.PI, true);
+      }
+    }
+    ctx.lineTo(x2, y2);
+  }
+}
+
 function roundRectPath(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);

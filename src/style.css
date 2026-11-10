@@ -195,6 +195,52 @@ a.btn { text-decoration: none; color: var(--text); }
 .tp-hide svg { width: 15px; height: 15px; }
 .tp-empty { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
+/* Search box (Ctrl+F): tables and fields */
+.search-box {
+  position: absolute; top: 12px; left: 16px; z-index: 8;
+  width: min(380px, calc(100% - 32px));
+  max-height: calc(100% - 110px);
+  display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.3); overflow: hidden;
+}
+.search-box[hidden] { display: none; }
+
+/* Hidden input behind a group's custom-colour dot; it only anchors the
+   browser's colour picker, which has a hex field */
+.group-color-input {
+  position: absolute; width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; pointer-events: none;
+}
+.sb-head { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+.sb-input {
+  flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; padding: 7px 10px; color: var(--text); font: inherit; font-size: 13px; outline: none;
+}
+.sb-input:focus { border-color: var(--accent); }
+.sb-count { flex: none; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sb-list { overflow-y: auto; padding: 4px; }
+.sb-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: 0; border-radius: 7px; background: none;
+  color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.sb-row:hover, .sb-row.is-active { background: var(--accent-weak); }
+.sb-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sb-kind {
+  flex: none; width: 18px; height: 18px; display: grid; place-items: center;
+  border-radius: 5px; background: var(--panel-2); color: var(--muted);
+  font-size: 10px; font-weight: 700;
+}
+.sb-kind.is-table { color: var(--accent); }
+.sb-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-name mark { background: none; color: var(--accent); font-weight: 600; }
+.sb-table { color: var(--muted); }
+.sb-hidden { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+.sb-type { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+.sb-empty { padding: 14px; text-align: center; color: var(--muted); font-size: 13px; }
+.sb-hint { padding: 6px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+
 /* "N hidden · Show all" restore chip */
 .hidden-chip {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
