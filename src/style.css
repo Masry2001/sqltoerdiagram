@@ -309,6 +309,34 @@ a.btn { text-decoration: none; color: var(--text); }
 .menu-item.active { color: var(--accent); font-weight: 600; }
 .menu-item.active::after { content: "✓"; font-size: 12px; }
 
+/* ---- My diagrams: the open diagram's name in the header, with its list ---- */
+.doc-wrap { margin-left: 10px; padding-left: 12px; border-left: 1px solid var(--border); min-width: 0; }
+.doc-btn { max-width: 240px; font-weight: 600; padding: 6px 9px; }
+.doc-btn #doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-rename {
+  width: 220px; font: inherit; font-size: 13px; font-weight: 600; color: var(--text);
+  background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 6px 9px; outline: none;
+}
+.doc-rename[hidden], .doc-btn[hidden] { display: none; }
+.doc-menu { min-width: 280px; }
+.doc-list { max-height: 300px; overflow-y: auto; }
+.doc-row { display: flex; align-items: center; gap: 2px; border-radius: 7px; }
+.doc-row:hover { background: var(--panel-2); }
+.doc-row.active .doc-row-name { color: var(--accent); font-weight: 600; }
+.doc-open {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font: inherit; font-size: 13px; color: var(--text); text-align: left;
+  background: transparent; border: 0; padding: 7px 9px; cursor: pointer; border-radius: 7px;
+}
+.doc-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-row-sub { flex: none; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.doc-del {
+  flex: none; width: 26px; height: 26px; font-size: 11px; color: var(--muted);
+  background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; opacity: .35;
+}
+.doc-row:hover .doc-del, .doc-del:focus-visible { opacity: 1; }
+.doc-del:hover { color: #e5534b; border-color: var(--border); }
+
 /* ---------- layout ---------- */
 .layout {
   display: flex;
@@ -636,6 +664,8 @@ body.embed .layout { height: 100vh; height: 100dvh; }
   .tb-group.utils { margin-left: 0; }
   .actions .divider { display: none; }
   .btn { padding: 7px 10px; }
+  .doc-wrap { margin-left: 6px; padding-left: 8px; }
+  .doc-btn { max-width: 120px; }
 
   /* SQL editor becomes a full-screen overlay, toggled by the SQL button */
   .layout { position: relative; }

@@ -79,7 +79,8 @@ async function loadProject(project) {
   const transfer = new DataTransfer();
   transfer.items.add(file);
   input.files = transfer.files;
-  input.dispatchEvent(new Event('change'));
+  input.dataset.mode = 'replace';     // load into the open diagram, not a new one
+  try { input.dispatchEvent(new Event('change')); } finally { delete input.dataset.mode; }
 
   const deadline = Date.now() + LOAD_TIMEOUT_MS;
   while (input.value !== '') {

@@ -81,6 +81,11 @@
         <span class="name">SQL&nbsp;to&nbsp;ER&nbsp;Diagram</span>
         <a class="brand-sub" href="https://yourbrowsercandoit.com/" target="_blank" rel="noopener">part of yourbrowsercandoit.com</a>
       </span>
+      <div class="menu-wrap doc-wrap">
+        <button id="doc-btn" class="btn ghost caret doc-btn" title="Your diagrams (saved in this browser)" aria-haspopup="true"><span id="doc-name">Untitled diagram</span></button>
+        <input id="doc-rename" class="doc-rename" type="text" aria-label="Diagram name" maxlength="80" hidden />
+        <div id="doc-menu" class="menu doc-menu" hidden></div>
+      </div>
     </div>
 
     <div class="actions">
@@ -95,7 +100,8 @@
         <div class="menu-wrap">
           <button id="btn-file" class="btn ghost caret" title="Open, save or embed a project" data-umami-event="file-menu">File</button>
           <div id="file-menu" class="menu" hidden>
-            <button id="btn-open" class="menu-item" title="Open a saved project (.json)" data-umami-event="open-project">Open project…</button>
+            <button id="btn-new" class="menu-item" title="Start a new, empty diagram">New diagram</button>
+            <button id="btn-open" class="menu-item" title="Open a saved project (.json) as a new diagram" data-umami-event="open-project">Open project…</button>
             <button id="btn-save" class="menu-item" title="Save SQL + layout to a file" data-umami-event="save-project">Save project</button>
             <div class="menu-sep"></div>
             <button id="btn-embed" class="menu-item" title="Get an &lt;iframe&gt; snippet to embed this diagram (read-only, live)" data-umami-event="embed">Embed diagram…</button>

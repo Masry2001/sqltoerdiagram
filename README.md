@@ -24,6 +24,14 @@ schema never leaves your machine — no server, no backend. Live at
 - **Groups**: the group name is always drawn on top. A group moves only when you
   drag its name, and its tables move with it. The fifth colour dot opens a picker
   for any hex colour.
+- **My diagrams**: keep several diagrams in the browser. The button next to the
+  logo shows the open diagram's name; its menu lists your diagrams (click one to
+  open it, ✕ to delete it) and has **New diagram**, **Rename…** (or double-click
+  the name) and **Duplicate**. **File → Open project…** opens a file as a new
+  diagram, and a shared link opens as its own diagram. Each diagram has its own
+  undo history. (The store comes from the upstream project.)
+- **Straight lines stay straight**: after **Arrange lines straight**, moving a
+  table, a group or a line end re-routes only the lines that need it.
 - **Search**: **Ctrl + F** finds tables and fields and jumps to them.
 - **Undo / redo**: **Ctrl + Z**, **Ctrl + Y** (or **Ctrl + Shift + Z**). Arrange
   asks before re-arranging tables that are in groups.

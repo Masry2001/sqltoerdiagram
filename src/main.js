@@ -12,6 +12,7 @@ import { highlightSQL } from './highlight.js';
 import { encodeShare, decodeShare } from './share.js';
 import { sanitizeAnnotations, groupColor } from './annotations.js';
 import { EXAMPLE_SQL } from './examples.js';
+import { createStore, hashText } from './store.js';
 
 const $ = (id) => document.getElementById(id);
 const sqlEl = $('sql');
@@ -50,6 +51,10 @@ sqlEl.addEventListener('scroll', () => {
 
 // ---- layout persistence (table positions + camera) ----
 const LAYOUT_KEY = 'dbdiga-layout';
+// My diagrams: several named diagrams in this browser. The open one keeps
+// living in the working keys above (dbdiga-sql / dbdiga-layout / …), so the
+// diagram that was open before this feature becomes the first in the list.
+const store = createStore();
 
 function collectLayout() {
   const positions = {};
@@ -70,6 +75,8 @@ function collectLayout() {
 function saveLayout() {
   try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(collectLayout())); } catch { /* quota */ }
   recordHistory();
+  // keep the diagram list's table count and "last changed" order fresh
+  if (!isEmbed) store.touch({ tables: diagram.model.tables.length, hash: hashText(sqlEl.value) });
 }
 
 // ---- undo / redo: every saved change is a step; the camera is not part of it ----
@@ -875,10 +882,22 @@ fileInput.addEventListener('change', () => {
   const file = fileInput.files && fileInput.files[0];
   if (!file) return;
   const reader = new FileReader();
+  // a project file opens as a new diagram named after the file; the MCP bridge
+  // marks its loads with data-mode="replace" to load into the open diagram
+  const replace = fileInput.dataset.mode === 'replace';
   reader.onload = () => {
     try {
       const data = JSON.parse(String(reader.result));
       if (typeof data.sql !== 'string') throw new Error('not a dbdiga project');
+      if (!replace) {
+        const name = file.name.replace(/\.json$/i, '').replace(/\.sqltoerdiagrams$/i, '') || 'Untitled diagram';
+        newDoc(name, {
+          sql: data.sql, dialect: data.dialect, format: data.format,
+          layout: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths },
+        });
+        fileInput.value = '';
+        return;
+      }
       sqlEl.value = data.sql;
       localStorage.setItem('dbdiga-sql', data.sql);
       if (data.dialect && DIALECTS[data.dialect]) { dialect = data.dialect; localStorage.setItem('dbdiga-dialect', dialect); syncDialect(); }
@@ -894,6 +913,124 @@ fileInput.addEventListener('change', () => {
   };
   reader.readAsText(file);
 });
+
+// ---- My diagrams: the header button with the open diagram's name ----
+const docBtn = $('doc-btn'), docName = $('doc-name'), docMenu = $('doc-menu'), docRename = $('doc-rename');
+const BASE_TITLE = document.title;
+const currentContent = () => ({ sql: sqlEl.value, format: formatChoice, dialect, layout: collectLayout() });
+const EMPTY_LAYOUT = { positions: {}, hidden: [], manualLinks: [], edgeBends: {}, edgeAnchors: {}, edgePaths: {}, annotations: [] };
+
+function syncDocUI() {
+  docName.textContent = store.current.name;
+  document.title = store.current.name === 'Untitled diagram' ? BASE_TITLE : `${store.current.name} · SQL to ER Diagram`;
+}
+
+// show a diagram's content in the editor and on the canvas (null = empty)
+function applyContent(c) {
+  clearTimeout(timer); timer = null;
+  clearTimeout(saveTimer); saveTimer = null;
+  if (c && c.dialect && DIALECTS[c.dialect]) { dialect = c.dialect; localStorage.setItem('dbdiga-dialect', dialect); syncDialect(); }
+  formatChoice = c && c.format && FORMATS[c.format] ? c.format : 'auto';
+  localStorage.setItem('dbdiga-format', formatChoice);
+  syncFormat();
+  sqlEl.value = (c && c.sql) || '';
+  undoStack.length = 0;            // undo history belongs to one diagram
+  redoStack.length = 0;
+  firstRender = true;
+  const restore = { ...EMPTY_LAYOUT };
+  for (const [k, v] of Object.entries((c && c.layout) || {})) if (v != null) restore[k] = v;
+  rebuild({ restore });
+  saveLayout();
+}
+function switchDoc(id) {
+  if (id === store.currentId) return;
+  const content = store.open(id, currentContent());
+  if (content === undefined) return;
+  applyContent(content);
+  syncDocUI();
+}
+function newDoc(name = 'Untitled diagram', content = { sql: '' }) {
+  const id = store.create(name, content);
+  if (!id) { window.alert('This browser’s storage is full. Delete a diagram first.'); return false; }
+  switchDoc(id);
+  return true;
+}
+function deleteDoc(id) {
+  const d = store.get(id);
+  if (!d || !window.confirm(`Delete “${d.name}”? This can’t be undone.`)) return;
+  if (id === store.currentId) {
+    const other = store.list().find((x) => x.id !== id);
+    if (other) switchDoc(other.id);
+    else if (!newDoc()) return;
+  }
+  store.remove(id);
+}
+function startRename() {
+  docMenu.hidden = true;
+  docRename.value = store.current.name;
+  docRename.hidden = false; docBtn.hidden = true;
+  docRename.focus(); docRename.select();
+}
+function endRename(commit) {
+  if (docRename.hidden) return;
+  if (commit && docRename.value.trim()) { store.rename(store.currentId, docRename.value); syncDocUI(); }
+  docRename.hidden = true; docBtn.hidden = false;
+}
+docRename.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); endRename(true); docBtn.focus(); }
+  else if (e.key === 'Escape') { e.preventDefault(); endRename(false); docBtn.focus(); }
+  e.stopPropagation();
+});
+docRename.addEventListener('blur', () => endRename(true));
+
+function renderDocMenu() {
+  docMenu.innerHTML = '';
+  const label = document.createElement('div');
+  label.className = 'menu-label';
+  label.textContent = 'My diagrams · saved in this browser';
+  docMenu.appendChild(label);
+  const listEl = document.createElement('div');
+  listEl.className = 'doc-list';
+  for (const d of store.list()) {
+    const row = document.createElement('div');
+    row.className = 'doc-row' + (d.id === store.currentId ? ' active' : '');
+    const open = document.createElement('button');
+    open.className = 'doc-open';
+    const nm = document.createElement('span'); nm.className = 'doc-row-name'; nm.textContent = d.name;
+    const sub = document.createElement('span'); sub.className = 'doc-row-sub';
+    sub.textContent = `${d.tables || 0} table${d.tables === 1 ? '' : 's'}`;
+    open.append(nm, sub);
+    open.addEventListener('click', () => { docMenu.hidden = true; switchDoc(d.id); });
+    const del = document.createElement('button');
+    del.className = 'doc-del'; del.textContent = '✕';
+    del.title = `Delete “${d.name}”`; del.setAttribute('aria-label', del.title);
+    del.addEventListener('click', (e) => { e.stopPropagation(); docMenu.hidden = true; deleteDoc(d.id); });
+    row.append(open, del);
+    listEl.appendChild(row);
+  }
+  docMenu.appendChild(listEl);
+  const sep = document.createElement('div'); sep.className = 'menu-sep'; docMenu.appendChild(sep);
+  const item = (text, run) => {
+    const b = document.createElement('button');
+    b.className = 'menu-item'; b.textContent = text;
+    b.addEventListener('click', () => { docMenu.hidden = true; run(); });
+    docMenu.appendChild(b);
+  };
+  item('New diagram', () => { if (newDoc()) sqlEl.focus(); });
+  item('Rename…', startRename);
+  item('Duplicate', () => newDoc(store.current.name + ' copy', currentContent()));
+}
+docBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  docMenu.hidden = !docMenu.hidden;
+  if (!docMenu.hidden) renderDocMenu();
+});
+docBtn.addEventListener('dblclick', startRename);
+docMenu.addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => { docMenu.hidden = true; });
+$('btn-new').addEventListener('click', () => { fileMenu.hidden = true; if (newDoc()) sqlEl.focus(); });
+if (isEmbed) docBtn.closest('.doc-wrap').hidden = true;
+syncDocUI();
 
 // ---- splitter (resize editor pane) ----
 const splitter = $('splitter');
@@ -1006,6 +1143,19 @@ if (isEmbed) {
   if (location.hash.startsWith('#s=')) {
     try {
       const data = await decodeShare(location.hash.slice(3));
+      if (!isEmbed) {
+        // the shared diagram opens as its own entry in My diagrams; the one
+        // that was open is kept. The link is then dropped from the address
+        // bar, so reloading doesn't open it again over your edits.
+        const parkedSql = localStorage.getItem('dbdiga-sql') || '';
+        if (parkedSql.trim()) {
+          const parked = { sql: parkedSql, dialect: localStorage.getItem('dbdiga-dialect'), format: localStorage.getItem('dbdiga-format'), layout: loadSavedLayout() };
+          const id = store.create('Shared diagram', null);
+          if (id) store.open(id, parked);
+        }
+        syncDocUI();
+        history.replaceState(null, '', location.pathname + location.search);
+      }
       sqlEl.value = data.sql || '';
       localStorage.setItem('dbdiga-sql', sqlEl.value);
       if (data.dialect && DIALECTS[data.dialect]) {
