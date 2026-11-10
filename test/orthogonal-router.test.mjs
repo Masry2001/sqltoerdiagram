@@ -1,5 +1,5 @@
 // Tests for "Arrange lines straight". Run: node test/orthogonal-router.test.mjs
-import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance } from '../src/orthogonal-router.js';
+import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits } from '../src/orthogonal-router.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error('  ✗ ' + msg); } };
@@ -94,6 +94,48 @@ function throughTable(paths, map) {
   const other = table('o', 400, 0);
   ok(pathFits(path, t, other), 'a path fits its tables');
   ok(!pathFits(path, moved, other), 'a path stops fitting when its table moves');
+}
+
+// re-routing a few lines keeps the rest: new lines avoid their lanes and ends
+{
+  const a = table('a', 0, 0), b = table('b', 600, 0), c = table('c', 0, 400), d = table('d', 600, 400);
+  const map = byKey(a, b, c, d);
+  const all = [edge('a', 'b', 0), edge('a', 'b', 1), edge('c', 'd', 0), edge('a', 'd', 0), edge('c', 'b', 0)];
+  const first = routeStraight(all, map).paths;
+  ok(Object.keys(first).length === all.length, 'every line routes before the move');
+  // move d down; its lines are re-routed while the others stay
+  const moved = byKey(a, b, c, { ...d, y: 560 });
+  const todo = all.filter((e) => e.toKey === 'd');
+  const keep = Object.fromEntries(all.filter((e) => e.toKey !== 'd').map((e) => [e.id, first[e.id]]));
+  const again = routeStraight(todo, moved, { keep });
+  ok(todo.every((e) => again.paths[e.id]), 'the moved table\'s lines are re-routed');
+  ok(todo.every((e) => pathFits(again.paths[e.id], moved.get(e.fromKey), moved.get(e.toKey))), 'the re-routed lines meet the moved table');
+  const merged = { ...keep, ...again.paths };
+  ok(orthogonal(merged), 're-routed lines are straight');
+  ok(!overlapping(merged), 're-routed lines don\'t lie on the kept lines');
+  ok(!throughTable(merged, moved), 're-routed lines don\'t pass under tables');
+  const ends = Object.values(merged).flatMap((p) => [p.points[0], p.points.at(-1)]).map((p) => p.join(','));
+  ok(new Set(ends).size === ends.length, 're-routed lines don\'t share an entry point with kept lines');
+}
+
+// the right angle drawn while dragging, and the under-a-table check
+{
+  const e = elbowPath({ fx: 200, fy: 50, tx: 400, ty: 300, fromSide: 'right', toSide: 'left' });
+  ok(orthogonal({ e }), 'the drag-time line is made of straight segments');
+  ok(e.points[0].join() === '200,50' && e.points.at(-1).join() === '400,300', 'the drag-time line meets both ends');
+  const t = elbowPath({ fx: 100, fy: 160, tx: 500, ty: 0, fromSide: 'bottom', toSide: 'right' });
+  ok(orthogonal({ t }), 'a line leaving downward and arriving sideways is straight too');
+  const blocker = table('x', 250, 100, 100, 100);
+  ok(pathUnderTables([[0, 150], [500, 150]], [blocker]), 'a line through a table is detected');
+  ok(!pathUnderTables([[0, 50], [500, 50]], [blocker]), 'a line beside a table is fine');
+  ok(!pathUnderTables([[350, 150], [500, 150]], [blocker]), 'a line leaving a table\'s edge doesn\'t cross it');
+  // a table nudged sideways: the line's end still touches the top edge, but
+  // the line now runs through the table
+  const from = table('f', 0, 0, 200, 100), to = table('g', 400, 300, 200, 100);
+  const path = { points: [[150, 0], [150, -32], [-32, -32], [-32, 350], [400, 350]], fromSide: 'top', toSide: 'left' };
+  ok(pathStillFits(path, from, to), 'an untouched path still fits');
+  const nudged = { ...from, x: -40 };
+  ok(pathFits(path, nudged, to) && !pathStillFits(path, nudged, to), 'a path that now crosses its own moved table no longer fits');
 }
 
 console.log(`orthogonal router: ${pass} passed, ${fail} failed`);

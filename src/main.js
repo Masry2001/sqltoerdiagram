@@ -141,6 +141,16 @@ function redo() {
   applyHistoryState(state);
   return true;
 }
+// Straight lines re-routed after a move arrive a moment later; they belong to
+// the move's undo step, so one Ctrl+Z undoes both.
+function amendLastHistory() {
+  if (applyingHistory) return;
+  flushPendingSave();                                    // the move is recorded first
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(collectLayout())); } catch { /* quota */ }
+  const state = historyState();
+  if (undoStack.length) undoStack[undoStack.length - 1] = state;
+  else undoStack.push(state);
+}
 let saveTimer = null;
 function saveLayoutDebounced() {
   clearTimeout(saveTimer);
@@ -175,6 +185,7 @@ function placeNewTables(model) {
 }
 
 diagram.onLayoutChange = saveLayoutDebounced;
+diagram.onLinesRerouted = amendLastHistory;
 
 // theme: restore preference
 const savedTheme = localStorage.getItem('dbdiga-theme') || 'dark';

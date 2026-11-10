@@ -67,8 +67,10 @@ class MinHeap {
 
 // edges: [{ id, fromKey, toKey }]; tables: Map key -> {key, x, y, w, h}.
 // anchors: hand-placed ends ({id: {from?: {side, t}, to?: {side, t}}}), kept.
+// keep: straight paths of other lines that stay as they are ({id: {points}});
+//   their lanes and entry points are reserved, so new lines avoid them.
 // Returns { paths: {id: {points, fromSide, toSide}}, failed: [id], overlapping: [id] }.
-export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false } = {}) {
+export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {} } = {}) {
   const tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !isHidden(t.key));
   if (!tables.length) return { paths: {}, failed: [], overlapping: [] };
 
@@ -102,22 +104,60 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     work.push({ edge, id: edge.id, from, to, ends: {} });
   }
 
+  const hOwner = new Int32Array(size);      // edge (c,r)-(c+1,r)
+  const vOwner = new Int32Array(size);      // edge (c,r)-(c,r+1)
+  const stubOwner = new Int32Array(size);   // stub cells belong to one line
+
+  // lines that stay: claim their segments and the cells next to their ends.
+  // The grid origin is a multiple of GRID, so their corners sit on grid lines.
+  const inGrid = (c, r) => c >= 0 && r >= 0 && c < cols && r < rows;
+  Object.values(keep).forEach((path, i) => {
+    const pts = path?.points;
+    if (!Array.isArray(pts) || pts.length < 2) return;
+    const owner = work.length + i + 1;
+    for (let k = 1; k < pts.length; k++) {
+      const [x1, y1] = pts[k - 1], [x2, y2] = pts[k];
+      if (y1 === y2) {
+        const r = (y1 - oy) / GRID;
+        if (!Number.isInteger(r)) continue;
+        const c0 = Math.ceil((Math.min(x1, x2) - ox) / GRID), c1 = Math.floor((Math.max(x1, x2) - ox) / GRID);
+        for (let c = c0; c < c1; c++) if (inGrid(c, r) && !hOwner[at(c, r)]) hOwner[at(c, r)] = owner;
+      } else if (x1 === x2) {
+        const c = (x1 - ox) / GRID;
+        if (!Number.isInteger(c)) continue;
+        const r0 = Math.ceil((Math.min(y1, y2) - oy) / GRID), r1 = Math.floor((Math.max(y1, y2) - oy) / GRID);
+        for (let r = r0; r < r1; r++) if (inGrid(c, r) && !vOwner[at(c, r)]) vOwner[at(c, r)] = owner;
+      }
+    }
+    // the first free grid cell outside each table edge, along the first and
+    // last segment: that's where the line's entry point sits on the grid
+    for (const [[ex, ey], [nx, ny]] of [[pts[0], pts[1]], [pts.at(-1), pts.at(-2)]]) {
+      const sx = Math.sign(nx - ex), sy = Math.sign(ny - ey);
+      const fx = (ex - ox) / GRID, fy = (ey - oy) / GRID;
+      let c = sx > 0 ? Math.ceil(fx) : sx < 0 ? Math.floor(fx) : Math.round(fx);
+      let r = sy > 0 ? Math.ceil(fy) : sy < 0 ? Math.floor(fy) : Math.round(fy);
+      for (let step = 0; step < 4 && inGrid(c, r) && blocked[at(c, r)]; step++) { c += sx; r += sy; }
+      if (inGrid(c, r) && !blocked[at(c, r)]) stubOwner[at(c, r)] = owner;
+    }
+  });
+
   // slots on a side: grid lines along it whose stub cell (just outside the
   // margin) is free
   const slotsOf = (table, side) => {
     const b = box.get(table.key);
     const out = [];
+    const free = (c, r) => !blocked[at(c, r)] && stubOwner[at(c, r)] <= work.length;   // not a kept line's end
     if (side === 'left' || side === 'right') {
       const c = side === 'right' ? b.c1 + 1 : b.c0 - 1;
       if (c < 0 || c >= cols) return out;
       for (let r = Math.ceil((table.y + 6 - oy) / GRID); wy(r) <= table.y + table.h - 6; r++) {
-        if (r >= 0 && r < rows && !blocked[at(c, r)]) out.push({ c, r, px: side === 'right' ? table.x + table.w : table.x, py: wy(r) });
+        if (r >= 0 && r < rows && free(c, r)) out.push({ c, r, px: side === 'right' ? table.x + table.w : table.x, py: wy(r) });
       }
     } else {
       const r = side === 'bottom' ? b.r1 + 1 : b.r0 - 1;
       if (r < 0 || r >= rows) return out;
       for (let c = Math.ceil((table.x + 6 - ox) / GRID); wx(c) <= table.x + table.w - 6; c++) {
-        if (c >= 0 && c < cols && !blocked[at(c, r)]) out.push({ c, r, px: wx(c), py: side === 'bottom' ? table.y + table.h : table.y });
+        if (c >= 0 && c < cols && free(c, r)) out.push({ c, r, px: wx(c), py: side === 'bottom' ? table.y + table.h : table.y });
       }
     }
     return out;
@@ -163,7 +203,6 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     if (!moved) break;
   }
 
-  const stubOwner = new Int32Array(size);   // stub cells belong to one line
   for (const list of sideLists.values()) {
     const slots = slotsOf(list.table, list.side);
     const vertical = list.side === 'top' || list.side === 'bottom';
@@ -171,14 +210,19 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     list.ends.sort((a, b) => along(a) - along(b) || a.item.id.localeCompare(b.item.id));
     const n = list.ends.length;
     const used = new Set();
-    list.ends.forEach((entry, i) => {
+    // ends placed by hand choose their slot first, the rest spread in order
+    const handFirst = list.ends.map((entry, i) => ({ entry, i })).sort((p, q) => (q.entry.hand ? 1 : 0) - (p.entry.hand ? 1 : 0));
+    handFirst.forEach(({ entry, i }) => {
       let pick = Math.min(slots.length - 1, Math.round(((i + 0.5) * slots.length) / n - 0.5));
-      if (entry.hand) {
+      if (entry.hand && entry.hand.side === list.side) {
         const want = vertical ? list.table.x + list.table.w * entry.hand.t : list.table.y + list.table.h * entry.hand.t;
         pick = slots.reduce((best, s, j) => (Math.abs((vertical ? s.px : s.py) - want) < Math.abs((vertical ? slots[best].px : slots[best].py) - want) ? j : best), 0);
       }
-      while (used.has(pick) && pick < slots.length - 1) pick++;
-      while (used.has(pick) && pick > 0) pick--;
+      // taken: the nearest free slot on either side
+      for (let d = 1; used.has(pick) && d < slots.length; d++) {
+        if (pick + d < slots.length && !used.has(pick + d)) pick += d;
+        else if (pick - d >= 0 && !used.has(pick - d)) pick -= d;
+      }
       if (!slots.length || used.has(pick)) { entry.item.failed = true; return; }
       used.add(pick);
       const slot = slots[pick];
@@ -188,8 +232,6 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   }
 
   // ---- routing ----
-  const hOwner = new Int32Array(size);   // edge (c,r)-(c+1,r)
-  const vOwner = new Int32Array(size);   // edge (c,r)-(c,r+1)
   const stamp = new Int32Array(size * 4);
   const gScore = new Float64Array(size * 4);
   const parent = new Int32Array(size * 4);
@@ -310,6 +352,51 @@ export function pathFits(path, from, to) {
   };
   const pts = path?.points;
   return Array.isArray(pts) && pts.length >= 2 && onSide(pts[0], from, path.fromSide) && onSide(pts[pts.length - 1], to, path.toSide);
+}
+
+// A quick right-angle line between two table edges, used while a table or end
+// is being dragged (it doesn't avoid tables; the line is re-routed on drop).
+// seg: {fx, fy, tx, ty, fromSide, toSide}.
+export function elbowPath(seg) {
+  const stub = GRID;
+  const a = [seg.fx + OUT[seg.fromSide][0] * stub, seg.fy + OUT[seg.fromSide][1] * stub];
+  const b = [seg.tx + OUT[seg.toSide][0] * stub, seg.ty + OUT[seg.toSide][1] * stub];
+  const fromVertical = seg.fromSide === 'top' || seg.fromSide === 'bottom';
+  const toVertical = seg.toSide === 'top' || seg.toSide === 'bottom';
+  const middle = [];
+  if (fromVertical === toVertical) {
+    // leave and arrive the same way: a step in the middle
+    if (fromVertical) { const y = (a[1] + b[1]) / 2; middle.push([a[0], y], [b[0], y]); }
+    else { const x = (a[0] + b[0]) / 2; middle.push([x, a[1]], [x, b[1]]); }
+  } else {
+    middle.push(fromVertical ? [a[0], b[1]] : [b[0], a[1]]);
+  }
+  const points = [];
+  for (const p of [[seg.fx, seg.fy], a, ...middle, b, [seg.tx, seg.ty]]) {
+    const last = points.at(-1);
+    if (!last || last[0] !== p[0] || last[1] !== p[1]) points.push(p);
+  }
+  return { points, fromSide: seg.fromSide, toSide: seg.toSide };
+}
+
+// Whether a path passes over any of the tables. Touching a table's edge (where
+// a line enters) doesn't count, so a line's own tables can be included: a
+// line crosses its own table only after that table was moved.
+export function pathUnderTables(points, tables) {
+  for (let i = 1; i < points.length; i++) {
+    const [x1, y1] = points[i - 1], [x2, y2] = points[i];
+    const lx = Math.min(x1, x2), hx = Math.max(x1, x2), ly = Math.min(y1, y2), hy = Math.max(y1, y2);
+    for (const t of tables) {
+      if (hx > t.x && lx < t.x + t.w && hy > t.y && ly < t.y + t.h) return true;
+    }
+  }
+  return false;
+}
+
+// A stored path is still usable when it starts and ends on its tables' edges
+// and doesn't cross either of them.
+export function pathStillFits(path, from, to) {
+  return pathFits(path, from, to) && !pathUnderTables(path.points, from === to ? [from] : [from, to]);
 }
 
 // The point halfway along a path.

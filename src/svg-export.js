@@ -3,7 +3,7 @@ import { THEMES, columnY, ROW_H, HEADER_H } from './renderer.js';
 import { NOTE_COLORS, groupColor } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
 import { routeEdges } from './edge-routing.js';
-import { pathFits, pathJumps, JUMP_RADIUS } from './orthogonal-router.js';
+import { pathStillFits, elbowPath, pathJumps, JUMP_RADIUS } from './orthogonal-router.js';
 
 // Crow's-foot cardinality marker at a line endpoint (world coords).
 //   dir = +1 if the line extends in +x from (x,y), else -1.
@@ -91,11 +91,16 @@ export function exportSVG(model, themeName, annotations = [], hidden = null, edg
     card: relationCardinality(r, byKey),
   }));
   const routed = routeEdges(edges, byKey, isHidden, edgeBends, edgeAnchors);
-  // straight paths (Arrange lines straight) replace curves while they fit
+  // straight paths (Arrange lines straight) replace curves while they fit; in
+  // straight mode a line without one is drawn as a simple right angle
   const facing = { right: 1, bottom: 1, left: -1, top: -1 };
+  const straightMode = Object.keys(edgePaths || {}).length > 0;
   for (const seg of routed) {
-    const path = edgePaths[seg.id];
-    if (!path || !pathFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) continue;
+    let path = edgePaths[seg.id];
+    if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
+      if (!straightMode) continue;
+      path = elbowPath(seg);
+    }
     const first = path.points[0], last = path.points[path.points.length - 1];
     Object.assign(seg, {
       path: path.points, fx: first[0], fy: first[1], tx: last[0], ty: last[1],

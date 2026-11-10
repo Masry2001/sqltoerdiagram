@@ -7,7 +7,7 @@ import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
-import { pathFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS } from './orthogonal-router.js';
+import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
 const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
@@ -56,6 +56,7 @@ export class Diagram {
     this.edgeAnchors = {};         // line id -> {from?, to?} ends pinned as {side, t}
     this.edgeEndDrag = null;       // active end drag {id, end, tableKey, moved}
     this.edgePaths = {};           // line id -> straight path {points, fromSide, toSide}
+    this._straightRun = 0;         // the latest straight routing; older results are dropped
     this.highlightedRoutes = [];   // lines emphasised on the last draw
     this.pinned = null;            // clicked table (sticky focus)
     this.pinnedKeys = null;        // Set of focused table + neighbour keys
@@ -691,10 +692,15 @@ export class Diagram {
     }
     const routes = routeEdges(edges, byKey, (key) => this.hidden.has(key), this.edgeBends, this.edgeAnchors);
     // a straight path from "Arrange lines straight" replaces the curve while it
-    // still fits its tables (moving a table turns its lines back into curves)
+    // still fits its tables. In straight mode a line without one (its table is
+    // being moved, or it waits to be re-routed) is drawn as a simple right angle.
+    const straightMode = this.isStraightMode();
     for (const seg of routes) {
-      const path = this.edgePaths[seg.id];
-      if (!path || !pathFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) continue;
+      let path = this.edgePaths[seg.id];
+      if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
+        if (!straightMode) continue;
+        path = elbowPath(seg);
+      }
       const first = path.points[0], last = path.points[path.points.length - 1];
       const facing = { right: 1, bottom: 1, left: -1, top: -1 };
       Object.assign(seg, {
@@ -710,6 +716,7 @@ export class Diagram {
   }
 
   setEdgePaths(paths) {
+    this._straightRun++;
     this.edgePaths = {};
     const sides = ['left', 'right', 'top', 'bottom'];
     for (const [id, p] of Object.entries(paths || {})) {
@@ -721,9 +728,16 @@ export class Diagram {
     this.markDirty();
   }
 
-  // Arrange lines straight: route every line as horizontal and vertical
-  // segments around the tables (in a background worker), then show them.
-  arrangeLinesStraight() {
+  // Lines are drawn straight once "Arrange lines straight" has run, until
+  // "Arrange lines" turns them back into curves.
+  isStraightMode() {
+    for (const _ in this.edgePaths) return true;
+    return false;
+  }
+
+  // What the straight router needs: tables, every line, and the ends the user
+  // placed by hand.
+  _straightInput() {
     const tables = this.model.tables
       .filter((t) => Number.isFinite(t.x))
       .map((t) => ({ key: t.key, x: t.x, y: t.y, w: t.w, h: t.h }));
@@ -742,24 +756,94 @@ export class Diagram {
       if (ends.to && !ends.to.arranged) hand.to = ends.to;
       if (hand.from || hand.to) anchors[id] = hand;
     }
+    return { tables, edges, anchors };
+  }
+
+  _runStraightWorker(message) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
-      worker.onmessage = (event) => {
-        worker.terminate();
-        const { paths, failed, overlapping, ms } = event.data;
-        this.edgePaths = paths;
-        this.pinnedEdge = null;
-        this.markDirty();
-        this.onLayoutChange?.();
-        resolve({ routed: Object.keys(paths).length, failed: failed.length, sharing: overlapping.length, ms });
-      };
+      worker.onmessage = (event) => { worker.terminate(); resolve(event.data); };
       worker.onerror = (err) => { worker.terminate(); reject(err); };
-      worker.postMessage({ tables, edges, anchors, hidden: [...this.hidden] });
+      worker.postMessage({ ...message, hidden: [...this.hidden] });
     });
+  }
+
+  // Arrange lines straight: route every line as horizontal and vertical
+  // segments around the tables (in a background worker), then show them.
+  async arrangeLinesStraight() {
+    const { tables, edges, anchors } = this._straightInput();
+    const run = ++this._straightRun;
+    const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges, anchors, keep: {} });
+    if (run === this._straightRun) {
+      this.edgePaths = paths;
+      this.pinnedEdge = null;
+      this.markDirty();
+      this.onLayoutChange?.();
+    }
+    return { routed: Object.keys(paths).length, failed: failed.length, sharing: overlapping.length, ms };
+  }
+
+  // After a table, group or line end moves in straight mode: re-route only the
+  // lines that no longer fit (their end left the table edge, a table now covers
+  // them, or they're new), and keep every other line exactly where it is.
+  async rerouteStraight() {
+    if (!this.isStraightMode()) return null;
+    const { tables, edges, anchors } = this._straightInput();
+    const byKey = new Map(tables.map((t) => [t.key, t]));
+    const visible = tables.filter((t) => !this.hidden.has(t.key));
+    const keep = {}, todo = [];
+    for (const e of edges) {
+      if (this.hidden.has(e.fromKey) || this.hidden.has(e.toKey)) continue;
+      const path = this.edgePaths[e.id];
+      const ok = path && pathStillFits(path, byKey.get(e.fromKey), byKey.get(e.toKey))
+        && !pathUnderTables(path.points, visible.filter((t) => t.key !== e.fromKey && t.key !== e.toKey));
+      if (ok) keep[e.id] = path;
+      else todo.push(e);
+    }
+    // an end the user placed by hand wins its spot: a kept line entering there
+    // is re-routed too
+    const handSpots = [];
+    for (const e of todo) {
+      for (const end of ['from', 'to']) {
+        const hand = anchors[e.id]?.[end];
+        const t = byKey.get(end === 'from' ? e.fromKey : e.toKey);
+        if (!hand || !t) continue;
+        const x = hand.side === 'left' ? t.x : hand.side === 'right' ? t.x + t.w : t.x + t.w * hand.t;
+        const y = hand.side === 'top' ? t.y : hand.side === 'bottom' ? t.y + t.h : t.y + t.h * hand.t;
+        handSpots.push({ key: t.key, x, y });
+      }
+    }
+    if (handSpots.length) {
+      for (const e of edges) {
+        const path = keep[e.id];
+        if (!path) continue;
+        const ends = [[e.fromKey, path.points[0]], [e.toKey, path.points.at(-1)]];
+        if (ends.some(([k, [x, y]]) => handSpots.some((s) => s.key === k && Math.hypot(s.x - x, s.y - y) < 24))) {
+          delete keep[e.id];
+          todo.push(e);
+        }
+      }
+    }
+    if (!todo.length) return { routed: 0 };
+    const run = ++this._straightRun;
+    const job = this._runStraightWorker({ tables, edges: todo, anchors, keep }).then(({ paths }) => {
+      // a newer move, an undo, or a switch back to curves happened meanwhile
+      if (run !== this._straightRun || !this.isStraightMode()) return null;
+      for (const e of todo) delete this.edgePaths[e.id];
+      Object.assign(this.edgePaths, paths);
+      this.markDirty();
+      if (this.onLinesRerouted) this.onLinesRerouted();
+      else this.onLayoutChange?.();
+      return { routed: Object.keys(paths).length };
+    }).catch((err) => { console.error('re-routing straight lines failed', err); return null; });
+    this.rerouting = job;                    // lets callers (and tests) wait for it
+    job.finally(() => { if (this.rerouting === job) this.rerouting = null; });
+    return job;
   }
 
   clearEdgePaths() {
     if (!Object.keys(this.edgePaths).length) return;
+    this._straightRun++;
     this.edgePaths = {};
     this.markDirty();
   }
@@ -798,6 +882,7 @@ export class Diagram {
     this.edgeAnchors = { ...result.anchors, ...keepAnchors };
     this.edgeBends = { ...result.bends, ...keepBends };
     this.edgePaths = {};                           // curved lines replace straight ones
+    this._straightRun++;
     this.pinnedEdge = null;
     this.markDirty();
     this.onLayoutChange?.();
@@ -1251,9 +1336,11 @@ export class Diagram {
     }
     const endHit = this._edgeEndAt(sx, sy);
     if (endHit) {
-      // moving an end by hand turns a straight line back into a curve
+      // a straight line is drawn as a simple right angle while its end moves,
+      // then re-routed when it's dropped
+      const savedPath = this.edgePaths[endHit.seg.id];
       delete this.edgePaths[endHit.seg.id];
-      this.edgeEndDrag = { id: endHit.seg.id, end: endHit.end, tableKey: endHit.tableKey, moved: false };
+      this.edgeEndDrag = { id: endHit.seg.id, end: endHit.end, tableKey: endHit.tableKey, moved: false, savedPath };
       return;
     }
     // 1) chrome of the selected annotation (colour dots / delete / resize)
@@ -1435,9 +1522,10 @@ export class Diagram {
 
   _pointerUp() {
     if (this.edgeEndDrag) {
-      const moved = this.edgeEndDrag.moved;
+      const { moved, id, savedPath } = this.edgeEndDrag;
       this.edgeEndDrag = null;
-      if (moved) this.onLayoutChange?.();
+      if (moved) { this.onLayoutChange?.(); this.rerouteStraight(); }
+      else if (savedPath) { this.edgePaths[id] = savedPath; this.markDirty(); }
       return;
     }
     if (this.edgeDrag) {
@@ -1474,7 +1562,7 @@ export class Diagram {
       return;
     }
     if (this.dragGroup) {
-      if (this.dragGroup.moved) this.onLayoutChange?.();
+      if (this.dragGroup.moved) { this.onLayoutChange?.(); this.rerouteStraight(); }
       this.dragGroup = null;
       return;
     }
@@ -1493,6 +1581,8 @@ export class Diagram {
     this.pressEdge = null;
     const changed = (this.drag && this.drag.moved) || (this.pan && this.pan.moved) ||
                     (this.annoDrag && this.annoDrag.moved) || (this.annoResize && this.annoResize.moved);
+    // tables moved (one table, or a group dragged by its name): re-route lines
+    if ((this.drag && this.drag.moved) || (this.annoDrag && this.annoDrag.moved && this.annoDrag.tables.length)) this.rerouteStraight();
     this.drag = null;
     this.pan = null;
     this.annoDrag = null;
@@ -1627,6 +1717,7 @@ export class Diagram {
     this.manualLinks.push({ from: { table: fk, col: fc }, to: { table: tk, col: tc } });
     this.markDirty();
     this.onLayoutChange?.();
+    this.rerouteStraight();
     return true;
   }
 
