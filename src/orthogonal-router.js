@@ -9,6 +9,23 @@
 //
 // Pure functions: no DOM, so the router can be tested in Node.
 export const GRID = 16;
+
+// Working arrays, kept between runs: allocating tens of megabytes on every
+// run was most of the cost of re-routing a few lines.
+const scratchArrays = new Map();
+let searchId = 0;
+function scratch(name, Type, length, clear) {
+  let a = scratchArrays.get(name);
+  if (!a || a.length < length) {
+    a = new Type(Math.ceil(length * 1.25));
+    scratchArrays.set(name, a);
+    if (name === 'stamp') searchId = 0;
+    return a.subarray(0, length);
+  }
+  const view = a.subarray(0, length);
+  if (clear) view.fill(0);
+  return view;
+}
 const CLEARANCE = GRID;        // space kept free around every table
 const PAD_CELLS = 24;          // free border around the whole diagram
 const BEND_COST = 4;
@@ -16,6 +33,10 @@ const CROSS_COST = 3;
 const SOFT_OVERLAP_COST = 60;  // last resort when no clean path exists
 const WINDOW_CELLS = 40;       // first search stays near the two tables
 const MAX_EXPANSIONS = 1500000;    // a search gives up after this many steps
+// fast mode (lines of a table being moved): trust the distance estimate more,
+// so a search looks at far fewer cells; routes get a few more bends
+const FAST_WEIGHT = 2;
+const FAST_EXPANSIONS = 150000;
 const SIDES = ['top', 'right', 'bottom', 'left'];
 const OUT = { right: [1, 0], left: [-1, 0], top: [0, -1], bottom: [0, 1] };
 const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];   // index: 0 right, 1 down, 2 left, 3 up
@@ -70,8 +91,16 @@ class MinHeap {
 // keep: straight paths of other lines that stay as they are ({id: {points}});
 //   their lanes and entry points are reserved, so new lines avoid them.
 // Returns { paths: {id: {points, fromSide, toSide}}, failed: [id], overlapping: [id] }.
-export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {} } = {}) {
-  const tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !isHidden(t.key));
+// area: optional {x0, y0, x1, y1}; only tables there (and the lines' own
+//   tables) are considered, which keeps the grid small and routing fast.
+// fast: quicker, slightly less tidy routes (used while tables are moved).
+export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false } = {}) {
+  let tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !isHidden(t.key));
+  if (area) {
+    const own = new Set(edges.flatMap((e) => [e.fromKey, e.toKey]));
+    tables = tables.filter((t) => own.has(t.key)
+      || (t.x < area.x1 && t.x + t.w > area.x0 && t.y < area.y1 && t.y + t.h > area.y0));
+  }
   if (!tables.length) return { paths: {}, failed: [], overlapping: [] };
 
   // ---- grid ----
@@ -85,7 +114,7 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   const wx = (c) => ox + c * GRID, wy = (r) => oy + r * GRID;
   const at = (c, r) => r * cols + c;
 
-  const blocked = new Uint8Array(size);
+  const blocked = scratch('blocked', Uint8Array, size, true);
   const box = new Map();   // table key -> its blocked cell range
   for (const t of tables) {
     const c0 = Math.max(0, Math.ceil((t.x - CLEARANCE - ox) / GRID));
@@ -104,9 +133,9 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     work.push({ edge, id: edge.id, from, to, ends: {} });
   }
 
-  const hOwner = new Int32Array(size);      // edge (c,r)-(c+1,r)
-  const vOwner = new Int32Array(size);      // edge (c,r)-(c,r+1)
-  const stubOwner = new Int32Array(size);   // stub cells belong to one line
+  const hOwner = scratch('hOwner', Int32Array, size, true);      // edge (c,r)-(c+1,r)
+  const vOwner = scratch('vOwner', Int32Array, size, true);      // edge (c,r)-(c,r+1)
+  const stubOwner = scratch('stubOwner', Int32Array, size, true);   // stub cells belong to one line
 
   // lines that stay: claim their segments and the cells next to their ends.
   // The grid origin is a multiple of GRID, so their corners sit on grid lines.
@@ -232,13 +261,14 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   }
 
   // ---- routing ----
-  const stamp = new Int32Array(size * 4);
-  const gScore = new Float64Array(size * 4);
-  const parent = new Int32Array(size * 4);
-  let searchId = 0;
+  // search state is reused between runs; stamps tell this search's entries
+  // from older ones, so nothing needs clearing
+  const stamp = scratch('stamp', Int32Array, size * 4, false);
+  const gScore = scratch('gScore', Float64Array, size * 4, false);
+  const parent = scratch('parent', Int32Array, size * 4, false);
 
-  function search(item, owner, start, goal, window, soft) {
-    searchId++;
+  function search(item, owner, start, goal, window, soft, limit = MAX_EXPANSIONS, w = 1) {
+    searchId = (searchId + 1) | 0 || 1;
     const heap = new MinHeap();
     const h = (c, r) => Math.abs(c - goal.c) + Math.abs(r - goal.r);
     const startDir = DIRS.findIndex(([dx, dy]) => dx === OUT[item.ends.from.side][0] && dy === OUT[item.ends.from.side][1]);
@@ -254,7 +284,7 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
       const cell = state >> 2, dir = state & 3;
       const g = gScore[state];
       if (cell === goalCell) { best = state; break; }
-      if (++expansions > MAX_EXPANSIONS) break;
+      if (++expansions > limit) break;
       const c = cell % cols, r = (cell / cols) | 0;
       for (let nd = 0; nd < 4; nd++) {
         if (nd === ((dir + 2) & 3)) continue;              // no U-turns
@@ -282,7 +312,7 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
         const ng = g + cost;
         if (stamp[next] === searchId && gScore[next] <= ng) continue;
         stamp[next] = searchId; gScore[next] = ng; parent[next] = state;
-        heap.push(ng + h(nc, nr), next);
+        heap.push(ng + w * h(nc, nr), next);
       }
     }
     if (best < 0) return null;
@@ -307,9 +337,9 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     const all = { c0: 0, c1: cols - 1, r0: 0, r1: rows - 1 };
     // a clean path near the two tables; failing that, the cheapest path that
     // shares as few segments as possible
-    const cells = search(item, owner, a, b, near, false)
-      || search(item, owner, a, b, near, true)
-      || search(item, owner, a, b, all, true);
+    const cells = fast
+      ? search(item, owner, a, b, near, true, FAST_EXPANSIONS, FAST_WEIGHT) || search(item, owner, a, b, all, true, FAST_EXPANSIONS * 2, FAST_WEIGHT)
+      : search(item, owner, a, b, near, false) || search(item, owner, a, b, near, true) || search(item, owner, a, b, all, true);
     if (!cells) { failed.push(item.id); continue; }
     let shares = false;
     for (let i = 1; i < cells.length; i++) {
@@ -531,4 +561,21 @@ function simplifyPath(points) {
     out.push(p);
   }
   return out;
+}
+
+// Routing for the lines of a table being moved: a quick pass for every line
+// (reported through onQuick, so they can be shown at once), then the careful
+// search for the few lines the quick pass couldn't route, around the others.
+// Holding a table and letting it go both use this, so they give the same lines.
+export function routeMoved(edges, byKey, { anchors = {}, isHidden = () => false, keep = {} } = {}, onQuick = null) {
+  const quick = routeStraight(edges, byKey, { anchors, isHidden, keep, fast: true });
+  if (!quick.failed.length) return quick;
+  onQuick?.(quick);
+  const rest = edges.filter((e) => quick.failed.includes(e.id));
+  const careful = routeStraight(rest, byKey, { anchors, isHidden, keep: { ...keep, ...quick.paths } });
+  return {
+    paths: { ...quick.paths, ...careful.paths },
+    failed: careful.failed,
+    overlapping: [...quick.overlapping, ...careful.overlapping],
+  };
 }

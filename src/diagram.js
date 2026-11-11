@@ -7,7 +7,7 @@ import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
-import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps } from './orthogonal-router.js';
+import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
 const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
@@ -15,6 +15,7 @@ const GROUP_LABEL_H = 32;      // screen px: the strip that holds a group's name
 const GROUP_LABEL_MIN_W = 80;  // screen px: keeps short or empty names grabbable
 const SEARCH_MIN_SCALE = 0.7;  // zoom used to show a search result that is too small to read
 const SEARCH_MARK_COLOR = '#f5b14a';
+const LIVE_IN_PAGE_MS = 25;     // live routing slower than this moves to a worker
 const EDGE_HIT = 8;            // screen px: how close a click must be to select a line
 const EDGE_HANDLE_R = 7;       // screen px: the bend handle on a clicked line
 const EDGE_HANDLE_HIT = 11;    // screen px: how close a press must be to grab it
@@ -794,7 +795,7 @@ export class Diagram {
   _runStraightWorker(message) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
-      worker.onmessage = (event) => { worker.terminate(); resolve(event.data); };
+      worker.onmessage = (event) => { if (event.data.partial) return; worker.terminate(); resolve(event.data); };
       worker.onerror = (err) => { worker.terminate(); reject(err); };
       worker.postMessage({ ...message, hidden: [...this.hidden] });
     });
@@ -831,19 +832,28 @@ export class Diagram {
     return keys;
   }
 
-  // While tables are dragged in straight mode, route their lines around the
-  // other tables in a background worker, again and again: one routing at a
-  // time, the next one starts from wherever the tables are by then. Until a
-  // route matches the tables' current spot, the line is a simple right angle.
+  // While tables are dragged in straight mode, their lines are routed around
+  // the other tables, with the quick routing ("fast"). For a table with few
+  // lines this runs in the page once per frame, so the lines always match the
+  // table's spot; when that gets slow (a very connected table) it runs in a
+  // background worker instead, one routing at a time, and until a route
+  // matches the table's current spot the line is a simple right angle.
   _scheduleLiveRoute() {
     if (!this.isStraightMode()) return;
-    if (this._live?.busy) { this._live.pending = true; return; }
-    this._startLiveRoute();
+    if (!this._live) this._live = { worker: null, busy: false, pending: false, frame: 0, slowMs: 0 };
+    const live = this._live;
+    if (live.slowMs < LIVE_IN_PAGE_MS) {
+      if (!live.frame) live.frame = requestAnimationFrame(() => { live.frame = 0; if (this._live === live) this._liveRouteInPage(); });
+      return;
+    }
+    if (live.busy) { live.pending = true; return; }
+    this._liveRouteInWorker();
   }
 
-  _startLiveRoute() {
+  // the lines of the dragged tables, and every other line that stays
+  _liveInput() {
     const keys = this._movingKeys();
-    if (!keys.size) return;
+    if (!keys.size) return null;
     const { tables, edges } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
     const todo = [], keep = {};
@@ -852,26 +862,41 @@ export class Diagram {
       const p = this.edgePaths[e.id];
       if (p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey))) keep[e.id] = p;
     }
-    if (!todo.length) return;
-    if (!this._live) {
-      this._live = { worker: new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' }), busy: false, pending: false };
-    }
+    return todo.length ? { tables, byKey, todo, keep } : null;
+  }
+
+  _liveRouteInPage() {
+    const input = this._liveInput();
+    if (!input) return;
+    const started = performance.now();
+    const { paths } = routeMoved(input.todo, input.byKey, { keep: input.keep, isHidden: (k) => this.hidden.has(k) });
+    if (this._live) this._live.slowMs = performance.now() - started;
+    this._livePaths = paths;
+    this.markDirty();
+  }
+
+  _liveRouteInWorker() {
+    const input = this._liveInput();
+    if (!input) return;
     const live = this._live;
+    if (!live.worker) live.worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
     live.busy = true;
     live.pending = false;
     live.worker.onmessage = (event) => {
-      live.busy = false;
       if (this._live !== live) return;               // the drag ended
       this._livePaths = event.data.paths;
       this.markDirty();
-      if (live.pending) this._startLiveRoute();
+      if (event.data.partial) return;               // the careful pass follows
+      live.busy = false;
+      if (live.pending) this._liveRouteInWorker();
     };
     live.worker.onerror = (err) => { live.busy = false; console.error('live routing failed', err); };
-    live.worker.postMessage({ tables, edges: todo, anchors: {}, keep, hidden: [...this.hidden] });
+    live.worker.postMessage({ tables: input.tables, edges: input.todo, anchors: {}, keep: input.keep, moved: true, hidden: [...this.hidden] });
   }
 
   _stopLiveRoute() {
-    if (this._live) this._live.worker.terminate();
+    if (this._live?.worker) this._live.worker.terminate();
+    if (this._live?.frame) cancelAnimationFrame(this._live.frame);
     this._live = null;
     this._livePaths = null;
   }
@@ -981,7 +1006,7 @@ export class Diagram {
       const result = {};
       let failed = [];
       if (todo1.length) {
-        const r1 = await this._runStraightWorker({ tables, edges: todo1, anchors, keep: keep1 });
+        const r1 = await this._runStraightWorker({ tables, edges: todo1, anchors, keep: keep1, moved: true });
         Object.assign(result, r1.paths);
         failed = r1.failed;
       }
