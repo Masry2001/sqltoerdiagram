@@ -116,6 +116,48 @@ npm run dev      # http://localhost:5173
 
 ## MCP
 
+### One-command install (all AI agents)
+
+macOS / Linux / Git Bash:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
+```
+
+Windows PowerShell (use `curl.exe`, since `curl` there is a different command):
+
+```powershell
+curl.exe -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
+```
+
+It needs Node 18+ and git. It clones the app to `~/.sql-to-erd` (or uses the
+checkout you run `node install.cjs` from), runs `npm install`, then for every
+agent it finds it registers the `sql-to-erd` MCP server and copies the
+[`sql-to-erd` skill](skills/sql-to-erd/SKILL.md), which tells the AI how to use
+the tools:
+
+| Agent | MCP config | Skill |
+| --- | --- | --- |
+| Claude Code | `claude mcp add -s user` (or `~/.claude.json`) | `~/.claude/skills/` |
+| Claude Desktop | `claude_desktop_config.json` | — |
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/skills/` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/skills/` |
+| VS Code (Copilot) | user `mcp.json` | — |
+| Codex | `~/.codex/config.toml` | `~/.agents/skills/` |
+| Gemini CLI | `~/.gemini/settings.json` | `~/.agents/skills/` |
+| OpenCode | `~/.config/opencode/opencode.json` | `~/.agents/skills/` |
+| Kiro | `~/.kiro/settings/mcp.json` | — |
+
+Existing config is merged, not replaced, and backed up once to
+`<file>.sql-to-erd.bak`. Re-running is safe. Add options after `node -`:
+`--dry-run`, `--uninstall`, `--only=cursor,codex`, `--dir=<path>`. From a checkout,
+`npm run mcp:install` does the same.
+
+Then restart the agent, run `npm run dev` in the app folder, open
+`http://localhost:5173`, and ask: *"Draw an ER diagram from schema.sql"*.
+
+### Manual setup
+
 `mcp/server.mjs` is an MCP server (stdio) that controls the diagram open at
 `http://localhost:5173` in dev mode. It can load and save projects, arrange tables
 and lines, add or remove links, set groups and notes, and take screenshots.

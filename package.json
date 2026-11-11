@@ -12,6 +12,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "mcp:install": "node install.cjs",
+    "mcp:uninstall": "node install.cjs --uninstall",
     "test": "node test/edit.test.mjs && node test/edge-routing.test.mjs && node test/search.test.mjs && node test/line-arranger.test.mjs && node test/orthogonal-router.test.mjs && node test/store.test.mjs"
   },
   "dependencies": {
