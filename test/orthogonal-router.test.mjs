@@ -1,5 +1,5 @@
 // Tests for "Arrange lines straight". Run: node test/orthogonal-router.test.mjs
-import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps } from '../src/orthogonal-router.js';
+import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps, moveSegment, nearestSegment } from '../src/orthogonal-router.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error('  ✗ ' + msg); } };
@@ -158,6 +158,37 @@ function throughTable(paths, map) {
   const runs = [{ id: 'r', points: [[0, 0], [16, 0], [50, 0], [50, 40]] }, { id: 's', points: [[0, 0], [30, 0], [30, 40]] }];
   const ra = separateOverlaps(runs);
   ok(orthogonal(Object.fromEntries(runs.map((p) => [p.id, { points: ra[p.id] || p.points }]))), 'lines with extra points on a straight run stay right-angled');
+}
+
+// facing tables of different heights get one straight line, not a step
+{
+  const map = byKey(table('pm', 0, 400, 340, 320), table('subs', 640, 0, 280, 710));
+  const { paths } = routeStraight([edge('pm', 'subs')], map);
+  const p = Object.values(paths)[0];
+  ok(p && p.points.length === 2 && p.points[0][1] === p.points[1][1], 'facing tables are joined by a single straight line');
+  // a hand-placed end decides the height, and the other end follows it
+  const id = edge('pm', 'subs').id;
+  const held = routeStraight([edge('pm', 'subs')], map, { anchors: { [id]: { from: { side: 'right', t: 0.8 } } } }).paths[id];
+  ok(held.points.length === 2 && Math.abs(held.points[0][1] - (400 + 320 * 0.8)) <= 16, 'the straight line follows a hand-placed end');
+  // a table between them still forces a way around
+  const blocked = byKey(table('pm', 0, 400, 340, 320), table('wall', 420, 300, 120, 500), table('subs', 640, 0, 280, 710));
+  const around = Object.values(routeStraight([edge('pm', 'subs')], blocked).paths)[0];
+  ok(around && !throughTable({ [edge('pm', 'subs').id]: around }, blocked), 'a table in the way is still avoided');
+}
+
+// a segment dragged by hand
+{
+  const from = table('f', 0, 0, 200, 160), to = table('g', 500, 300, 200, 160);
+  const path = { points: [[200, 80], [352, 80], [352, 384], [500, 384]], fromSide: 'right', toSide: 'left' };
+  const mid = moveSegment(path, 2, 421, from, to);
+  ok(mid.hand && mid.points[1][0] === 416 && mid.points[2][0] === 416, 'the middle segment moves sideways, on the grid');
+  ok(pathStillFits(mid, from, to) && orthogonal({ mid }), 'the moved line still meets both tables, with right angles');
+  ok(moveSegment(path, 2, 100, from, to).points[1][0] >= 216, 'a segment next to a table stays outside it');
+  const first = moveSegment(path, 1, 999, from, to);
+  ok(first.points[0][1] <= 154 && first.points[0][0] === 200, 'an end slides along its table side and stays on it');
+  const straight = moveSegment(path, 2, 0, from, to);
+  ok(straight && orthogonal({ straight }), 'moving a segment never tilts the line');
+  ok(nearestSegment(path.points, 360, 200).index === 2, 'the segment nearest a point is found');
 }
 
 console.log(`orthogonal router: ${pass} passed, ${fail} failed`);

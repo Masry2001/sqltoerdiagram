@@ -251,18 +251,103 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     if (!moved) break;
   }
 
+  // ---- straight lines first ----
+  // When two ends face each other and one clear grid line joins them, both
+  // ends take that grid line, so the line needs no turn. Spreading each side
+  // on its own put them at different heights and forced a step in the line.
+  const OPPOSITE = { right: 'left', left: 'right', bottom: 'top', top: 'bottom' };
+  const fixedSlot = new Map();   // end entry -> its slot on the straight line
+  const reserved = new Set();    // cells the straight lines run through
+  const taken = new Set();       // slots already given to a straight line
+  const slotKey = (table, s) => table.key + '|' + s.c + '|' + s.r;
+  // a straight line may pass the side of another table, over the cells its
+  // ends would use; it does so only while that side keeps enough of them
+  const sideAt = new Map();      // stub cell -> side list with ends
+  const lost = new Map();        // side list -> slots taken by straight lines
+  const room = new Map();        // side list -> slots it has
   for (const list of sideLists.values()) {
+    if (!list.ends.length) continue;
     const slots = slotsOf(list.table, list.side);
+    room.set(list, slots.length);
+    for (const s of slots) sideAt.set(at(s.c, s.r), list);
+  }
+  const straightRun = (a, b, runsVertically, item) => {
+    const cells = [];
+    if (runsVertically) for (let r = Math.min(a.r, b.r); r <= Math.max(a.r, b.r); r++) cells.push(at(a.c, r));
+    else for (let c = Math.min(a.c, b.c); c <= Math.max(a.c, b.c); c++) cells.push(at(c, a.r));
+    const owners = runsVertically ? vOwner : hOwner;
+    for (let i = 0; i < cells.length; i++) {
+      const k = cells[i];
+      if (blocked[k] || reserved.has(k) || stubOwner[k] > work.length) return null;   // a table, or a kept line's end
+      if (groupAt[k] && !item.home?.has(groupAt[k])) return null;                     // a group the line doesn't belong to
+      if (i < cells.length - 1 && owners[k]) return null;                             // a kept line runs along it
+    }
+    const passes = new Map();
+    for (const k of cells.slice(1, -1)) {
+      const list = sideAt.get(k);
+      if (list) passes.set(list, (passes.get(list) || 0) + 1);
+    }
+    for (const [list, n] of passes) if (room.get(list) - (lost.get(list) || 0) - n < list.ends.length + 1) return null;
+    for (const [list, n] of passes) lost.set(list, (lost.get(list) || 0) + n);
+    return cells;
+  };
+  const span = (item) => Math.abs(centerOf(item.from).x - centerOf(item.to).x) + Math.abs(centerOf(item.from).y - centerOf(item.to).y);
+  for (const item of [...work].sort((p, q) => span(p) - span(q) || p.id.localeCompare(q.id))) {
+    if (item.from === item.to) continue;
+    const ea = item.ends.from.entry, eb = item.ends.to.entry;
+    const sa = item.ends.from.side, sb = item.ends.to.side;
+    if (!ea || !eb || OPPOSITE[sa] !== sb || (ea.hand && eb.hand)) continue;
+    const runsVertically = sa === 'top' || sa === 'bottom';
+    const along = (s) => (runsVertically ? s.c : s.r);
+    const SA = slotsOf(item.from, sa), SB = slotsOf(item.to, sb);
+    const onB = new Map(SB.map((s) => [along(s), s]));
+    const forward = runsVertically ? OUT[sa][1] : OUT[sa][0];
+    let pairs = SA.filter((s) => onB.has(along(s))).map((s) => [s, onB.get(along(s))])
+      .filter(([a, b]) => (runsVertically ? b.r - a.r : b.c - a.c) * forward > 0
+        && !taken.has(slotKey(item.from, a)) && !taken.has(slotKey(item.to, b)));
+    if (!pairs.length) continue;
+    // a hand-placed end decides where the line sits; otherwise the middle of
+    // the stretch the two sides share
+    let want = (along(pairs[0][0]) + along(pairs[pairs.length - 1][0])) / 2;
+    const handEnd = ea.hand?.side === sa ? [ea, item.from, SA] : eb.hand?.side === sb ? [eb, item.to, SB] : null;
+    if (handEnd) {
+      const [e, t, slots] = handEnd;
+      const spot = runsVertically ? t.x + t.w * e.hand.t : t.y + t.h * e.hand.t;
+      const nearest = slots.reduce((best, s) => (Math.abs((runsVertically ? s.px : s.py) - spot) < Math.abs((runsVertically ? best.px : best.py) - spot) ? s : best), slots[0]);
+      want = along(nearest);
+      pairs = pairs.filter(([a]) => along(a) === want);
+    }
+    pairs.sort((p, q) => Math.abs(along(p[0]) - want) - Math.abs(along(q[0]) - want));
+    for (const [a, b] of pairs.slice(0, 32)) {
+      const cells = straightRun(a, b, runsVertically, item);
+      if (!cells) continue;
+      fixedSlot.set(ea, a); fixedSlot.set(eb, b);
+      taken.add(slotKey(item.from, a)); taken.add(slotKey(item.to, b));
+      for (const k of cells) reserved.add(k);
+      item.straight = true;
+      break;
+    }
+  }
+
+  for (const list of sideLists.values()) {
+    // other ends keep off the straight lines' cells
+    const mine = new Set(list.ends.filter((e) => fixedSlot.has(e)).map((e) => at(fixedSlot.get(e).c, fixedSlot.get(e).r)));
+    const slots = slotsOf(list.table, list.side).filter((s) => !reserved.has(at(s.c, s.r)) || mine.has(at(s.c, s.r)));
     const vertical = list.side === 'top' || list.side === 'bottom';
     const along = (e) => (vertical ? centerOf(e.other).x : centerOf(e.other).y);
     list.ends.sort((a, b) => along(a) - along(b) || a.item.id.localeCompare(b.item.id));
     const n = list.ends.length;
     const used = new Set();
-    // ends placed by hand choose their slot first, the rest spread in order
-    const handFirst = list.ends.map((entry, i) => ({ entry, i })).sort((p, q) => (q.entry.hand ? 1 : 0) - (p.entry.hand ? 1 : 0));
+    // straight lines and ends placed by hand choose their slot first, the
+    // rest spread in order
+    const rankOf = (e) => (fixedSlot.has(e) ? 2 : e.hand ? 1 : 0);
+    const handFirst = list.ends.map((entry, i) => ({ entry, i })).sort((p, q) => rankOf(q.entry) - rankOf(p.entry));
     handFirst.forEach(({ entry, i }) => {
       let pick = Math.min(slots.length - 1, Math.round(((i + 0.5) * slots.length) / n - 0.5));
-      if (entry.hand && entry.hand.side === list.side) {
+      const fixed = fixedSlot.get(entry);
+      const fixedAt = fixed ? slots.findIndex((s) => s.c === fixed.c && s.r === fixed.r) : -1;
+      if (fixedAt >= 0) pick = fixedAt;
+      else if (entry.hand && entry.hand.side === list.side) {
         const want = vertical ? list.table.x + list.table.w * entry.hand.t : list.table.y + list.table.h * entry.hand.t;
         pick = slots.reduce((best, s, j) => (Math.abs((vertical ? s.px : s.py) - want) < Math.abs((vertical ? slots[best].px : slots[best].py) - want) ? j : best), 0);
       }
@@ -348,7 +433,8 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   const failed = [];
   const overlapping = [];
   const manhattan = (item) => Math.abs(centerOf(item.from).x - centerOf(item.to).x) + Math.abs(centerOf(item.from).y - centerOf(item.to).y);
-  const order = [...work].sort((a, b) => manhattan(a) - manhattan(b) || a.id.localeCompare(b.id));
+  // straight lines go first, so no other line takes their grid line
+  const order = [...work].sort((a, b) => (b.straight ? 1 : 0) - (a.straight ? 1 : 0) || manhattan(a) - manhattan(b) || a.id.localeCompare(b.id));
   for (const item of order) {
     const a = item.ends.from, b = item.ends.to;
     if (item.failed || a?.c === undefined || b?.c === undefined) { failed.push(item.id); continue; }
@@ -584,6 +670,60 @@ function simplifyPath(points) {
     out.push(p);
   }
   return out;
+}
+
+// Moves one segment of a straight path sideways, the way the user drags it:
+// segment i joins points i-1 and i; value is the new y of a horizontal segment
+// or the new x of a vertical one, snapped to the grid. A segment that touches a
+// table slides that end along the table's side and stays on it; the segments
+// next to a table keep leaving it outwards. Returns the new path (marked as
+// placed by hand), or null when the segment can't be moved.
+export function moveSegment(path, i, value, from, to) {
+  const pts = path?.points;
+  if (!Array.isArray(pts) || i < 1 || i >= pts.length) return null;
+  const [a, b] = [pts[i - 1], pts[i]];
+  const horizontal = a[1] === b[1];
+  if (!horizontal && a[0] !== b[0]) return null;
+  const k = horizontal ? 1 : 0;                      // the coordinate that changes
+  let lo = -Infinity, hi = Infinity;
+  const last = pts.length - 1;
+  // an end on a table stays on its side, away from the corners
+  const along = (t) => {
+    const start = horizontal ? t.y : t.x, size = horizontal ? t.h : t.w;
+    lo = Math.max(lo, Math.ceil((start + 6) / GRID) * GRID);
+    hi = Math.min(hi, Math.floor((start + size - 6) / GRID) * GRID);
+  };
+  if (i === 1) along(from);
+  if (i === last) along(to);
+  // a segment next to the table's stub stays at least one grid step outside it
+  const outside = (t, side) => {
+    if (side === 'right') lo = Math.max(lo, t.x + t.w + GRID);
+    if (side === 'left') hi = Math.min(hi, t.x - GRID);
+    if (side === 'bottom') lo = Math.max(lo, t.y + t.h + GRID);
+    if (side === 'top') hi = Math.min(hi, t.y - GRID);
+  };
+  const vertical = (side) => side === 'top' || side === 'bottom';
+  if (i === 2 && horizontal === vertical(path.fromSide)) outside(from, path.fromSide);
+  if (i === last - 1 && horizontal === vertical(path.toSide)) outside(to, path.toSide);
+  if (lo > hi) return null;
+  const v = Math.min(hi, Math.max(lo, Math.round(value / GRID) * GRID));
+  const next = pts.map((p) => [p[0], p[1]]);
+  next[i - 1][k] = v;
+  next[i][k] = v;
+  return { points: simplifyPath(next), fromSide: path.fromSide, toSide: path.toSide, hand: true };
+}
+
+// The segment of a path nearest to a point: { index, distance }.
+export function nearestSegment(points, x, y) {
+  let best = { index: -1, distance: Infinity };
+  for (let i = 1; i < points.length; i++) {
+    const [x1, y1] = points[i - 1], [x2, y2] = points[i];
+    const cx = Math.max(Math.min(x1, x2), Math.min(Math.max(x1, x2), x));
+    const cy = Math.max(Math.min(y1, y2), Math.min(Math.max(y1, y2), y));
+    const d = Math.hypot(x - cx, y - cy);
+    if (d < best.distance) best = { index: i, distance: d };
+  }
+  return best;
 }
 
 // Routing for the lines of a table being moved: a quick pass for every line

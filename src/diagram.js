@@ -7,7 +7,7 @@ import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
-import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved } from './orthogonal-router.js';
+import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved, moveSegment, nearestSegment } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
 const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
@@ -17,6 +17,7 @@ const SEARCH_MIN_SCALE = 0.7;  // zoom used to show a search result that is too 
 const SEARCH_MARK_COLOR = '#f5b14a';
 const LIVE_IN_PAGE_MS = 25;     // live routing slower than this moves to a worker
 const EDGE_HIT = 8;            // screen px: how close a click must be to select a line
+const SEPARATION_SLACK = 4;    // screen px: lines drawn apart sit this far off their route
 const EDGE_HANDLE_R = 7;       // screen px: the bend handle on a clicked line
 const EDGE_HANDLE_HIT = 11;    // screen px: how close a press must be to grab it
 const EDGE_END_R = 5;          // screen px: the handle at each end of a clicked line
@@ -56,6 +57,7 @@ export class Diagram {
     this.edgeDrag = null;          // active bend {id, baseX, baseY, grabX, grabY, moved}
     this.edgeAnchors = {};         // line id -> {from?, to?} ends pinned as {side, t}
     this.edgeEndDrag = null;       // active end drag {id, end, tableKey, moved}
+    this.segDrag = null;           // a straight line's segment being dragged {id, index, savedPath, moved}
     this.edgePaths = {};           // line id -> straight path {points, fromSide, toSide}
     this._straightRun = 0;         // the latest straight routing; older results are dropped
     this._live = null;             // background routing while tables are dragged
@@ -756,7 +758,9 @@ export class Diagram {
       const ok = Array.isArray(p?.points) && p.points.length >= 2
         && p.points.every((pt) => Array.isArray(pt) && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
         && sides.includes(p.fromSide) && sides.includes(p.toSide);
-      if (ok) this.edgePaths[id] = { points: p.points.map(([x, y]) => [x, y]), fromSide: p.fromSide, toSide: p.toSide };
+      if (!ok) continue;
+      this.edgePaths[id] = { points: p.points.map(([x, y]) => [x, y]), fromSide: p.fromSide, toSide: p.toSide };
+      if (p.hand) this.edgePaths[id].hand = true;      // shaped by the user
     }
     this.markDirty();
   }
@@ -807,10 +811,18 @@ export class Diagram {
   // segments around the tables (in a background worker), then show them.
   async arrangeLinesStraight() {
     const { tables, edges, anchors } = this._straightInput();
+    // lines the user shaped by hand stay, while they still fit their tables
+    const byKey = new Map(tables.map((t) => [t.key, t]));
+    const keep = {};
+    for (const e of edges) {
+      const p = this.edgePaths[e.id];
+      if (p?.hand && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey))) keep[e.id] = p;
+    }
     const run = ++this._straightRun;
-    const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges, anchors, keep: {} });
+    const todo = edges.filter((e) => !keep[e.id]);
+    const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges: todo, anchors, keep });
     if (run === this._straightRun) {
-      this.edgePaths = paths;
+      this.edgePaths = { ...keep, ...paths };
       // entry points and bends from the curved "Arrange lines" don't apply to
       // straight lines; ones placed by hand are kept
       const hand = {};
@@ -1023,8 +1035,8 @@ export class Diagram {
         if (result[e.id]) { keep2[e.id] = result[e.id]; continue; }
         const p = this.edgePaths[e.id];
         const moved = touches(e);
-        const ok = fits(e, p) && (moved ? settled.has(e.id) : clear(e, p) && !takesHandSpot(e, p)
-          && !((busy.has(e.fromKey) || busy.has(e.toKey)) && p));
+        const ok = fits(e, p) && (moved ? settled.has(e.id) : p.hand || (clear(e, p) && !takesHandSpot(e, p)
+          && !((busy.has(e.fromKey) || busy.has(e.toKey)) && p)));
         if (ok) keep2[e.id] = p;
         else if (!moved || failed.includes(e.id)) todo2.push(e);
       }
@@ -1169,6 +1181,21 @@ export class Diagram {
     if (near(seg.fx, seg.fy)) return { seg, end: 'from', tableKey: seg.fromKey };
     if (near(seg.tx, seg.ty)) return { seg, end: 'to', tableKey: seg.toKey };
     return null;
+  }
+
+  // The clicked straight line, when the point is on one of its segments: that
+  // segment can be dragged sideways to shape the line by hand.
+  _edgeSegmentAt(sx, sy) {
+    const seg = this._pinnedRoute();
+    if (!seg?.basePath) return null;
+    const path = this.edgePaths[seg.id];
+    const byKey = this._tableMap();
+    if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) return null;
+    const w = this.screenToWorld(sx, sy);
+    const hit = nearestSegment(path.points, w.x, w.y);
+    if (hit.index < 0 || hit.distance > (EDGE_HIT + SEPARATION_SLACK) / this.cam.scale) return null;
+    const [a, b] = [path.points[hit.index - 1], path.points[hit.index]];
+    return { seg, index: hit.index, horizontal: a[1] === b[1] };
   }
 
   _pinnedRoute() {
@@ -1423,6 +1450,7 @@ export class Diagram {
       else if (this._annoChromeAt(sx, sy) || this._addButtonAt(sx, sy)) c.style.cursor = 'pointer';
       else if (this._edgeDeleteAt(sx, sy)) c.style.cursor = 'pointer';
       else if (this._edgeHandleAt(sx, sy) || this._edgeEndAt(sx, sy) || this._noteAt(sx, sy)) c.style.cursor = 'grab';
+      else if (this._edgeSegmentAt(sx, sy)) c.style.cursor = this._edgeSegmentAt(sx, sy).horizontal ? 'ns-resize' : 'ew-resize';
       else if (this._groupLabelAt(sx, sy)) c.style.cursor = 'move';
       else if (t) c.style.cursor = 'grab';
       else if (edgeId) c.style.cursor = 'pointer';
@@ -1448,7 +1476,7 @@ export class Diagram {
         tap = { sx: p.sx, sy: p.sy, moved: false };
         this._pointerDown(p.sx, p.sy, false, false);
       } else if (e.touches.length === 2) {
-        this.drag = this.pan = this.annoDrag = this.annoResize = this.edgeDrag = this.edgeEndDrag = null;   // cancel single-finger
+        this.drag = this.pan = this.annoDrag = this.annoResize = this.edgeDrag = this.edgeEndDrag = this.segDrag = null;   // cancel single-finger
         tap = null;
         const a = tpos(e.touches[0]), b = tpos(e.touches[1]);
         pinch = { dist: Math.hypot(a.sx - b.sx, a.sy - b.sy) || 1, mx: (a.sx + b.sx) / 2, my: (a.sy + b.sy) / 2 };
@@ -1554,6 +1582,13 @@ export class Diagram {
       this.edgeEndDrag = { id: endHit.seg.id, end: endHit.end, tableKey: endHit.tableKey, moved: false, savedPath };
       return;
     }
+    const segHit = this._edgeSegmentAt(sx, sy);
+    if (segHit) {
+      // a straight line's segment: dragged sideways, it shapes the line by hand
+      this.segDrag = { id: segHit.seg.id, index: segHit.index, horizontal: segHit.horizontal,
+        fromKey: segHit.seg.fromKey, toKey: segHit.seg.toKey, savedPath: this.edgePaths[segHit.seg.id], moved: false };
+      return;
+    }
     // 1) chrome of the selected annotation (colour dots / delete / resize)
     const chrome = this._annoChromeAt(sx, sy);
     if (chrome) {
@@ -1651,6 +1686,21 @@ export class Diagram {
 
   // returns true if an active drag/pan/resize consumed the move
   _pointerMove(sx, sy) {
+    if (this.segDrag) {
+      const drag = this.segDrag;
+      const w = this.screenToWorld(sx, sy);
+      const byKey = this._tableMap();
+      const from = byKey.get(drag.fromKey), to = byKey.get(drag.toKey);
+      const next = moveSegment(drag.savedPath, drag.index, drag.horizontal ? w.y : w.x, from, to);
+      // the line can't be put under a table
+      const others = this.model.tables.filter((t) => Number.isFinite(t.x) && !this.hidden.has(t.key));
+      if (next && !pathUnderTables(next.points, others)) {
+        this.edgePaths[drag.id] = next;
+        drag.moved = true;
+        this.markDirty();
+      }
+      return true;
+    }
     if (this.edgeEndDrag) {
       const drag = this.edgeEndDrag;
       const table = this._tableMap().get(drag.tableKey);
@@ -1738,6 +1788,13 @@ export class Diagram {
     const movedKeys = this._movingKeys();     // before the drag state is cleared
     const livePaths = this._livePaths;
     this._stopLiveRoute();
+    if (this.segDrag) {
+      const { moved, id } = this.segDrag;
+      this.segDrag = null;
+      if (moved) this.onLayoutChange?.();
+      else { const seg = this._pinnedRoute(); if (seg?.id === id) this._pinEdge(seg); }   // a plain click unpins, as before
+      return;
+    }
     if (this.edgeEndDrag) {
       const { moved, id, savedPath } = this.edgeEndDrag;
       this.edgeEndDrag = null;
@@ -2016,6 +2073,14 @@ export class Diagram {
       this._clearEdgeAnchor(endHit.seg.id, endHit.end);
       this.markDirty();
       this.onLayoutChange?.();
+      return;
+    }
+    const segHit = this._edgeSegmentAt(sx, sy);
+    if (segHit && this.edgePaths[segHit.seg.id]?.hand) {   // double-click a shaped line to route it automatically again
+      delete this.edgePaths[segHit.seg.id];
+      this.markDirty();
+      this.onLayoutChange?.();
+      this.rerouteStraight();
       return;
     }
     const t = this.tableAt(sx, sy);

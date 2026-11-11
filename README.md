@@ -33,11 +33,16 @@ Details are in [MCP](#mcp) below.
 - **Arrange ▾ → Arrange lines straight**: every relation becomes a right-angle line
   that goes around tables, each line enters its table at its own point, lines keep
   to their own lanes where there's room, and crossings are drawn as small
-  semicircle jumps. It runs in the background, so the page stays responsive.
+  semicircle jumps. Two tables that face each other get one straight line, with
+  no step, whenever nothing is in the way. It runs in the background, so the page
+  stays responsive.
 - **Arrange ▾ → Arrange lines**: the curved version. It spreads entry points so no
   two lines share one, and picks paths that avoid tables and crossings.
 - **Lines you can edit**: click a line to pin it (everything else dims), drag its
   middle to bend it, drag either end to move where it enters or leaves a table.
+  On a straight line, drag any segment sideways to shape the line yourself: it
+  stays as you left it (also through **Arrange lines straight**) until one of its
+  tables moves, and a double-click on it makes it automatic again.
   Press **Delete** to remove a pinned manual link. A table's right-click menu lists
   its manual links, so each one can be removed on its own.
 - **Groups**: the group name is always drawn on top. A group moves only when you
