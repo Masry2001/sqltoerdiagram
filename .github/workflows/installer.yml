@@ -1,0 +1,79 @@
+name: Installer
+
+# Runs the documented one-liner (curl ... | node -) on a clean machine and
+# checks that every agent config is set up, re-runs are no-ops, the MCP server
+# answers, the app starts with the bridge, and --uninstall cleans up.
+on:
+  push:
+    paths: [install.cjs, skills/**, mcp/**, .github/workflows/installer.yml, .github/scripts/**]
+  pull_request:
+    paths: [install.cjs, skills/**, mcp/**, .github/workflows/installer.yml, .github/scripts/**]
+  workflow_dispatch:
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [20]
+        include:
+          - os: ubuntu-latest
+            node: 18
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Install from the commit under test (a fork's branch on pull requests).
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      HEAD_REF: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Fake agent folders, with existing config to keep
+        run: |
+          mkdir -p ~/.cursor ~/.codex ~/.gemini ~/.config/opencode ~/.config/VSCodium/User
+          echo '{"mcpServers":{"other":{"command":"other"}}}' > ~/.cursor/mcp.json
+          printf 'model = "x"\n\n[mcp_servers.other]\ncommand = "other"\n' > ~/.codex/config.toml
+
+      - name: Install with the curl one-liner
+        env:
+          SQL_TO_ERD_REPO: https://github.com/${{ env.HEAD_REPO }}.git
+          SQL_TO_ERD_REF: ${{ env.HEAD_REF }}
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/$HEAD_REPO/$HEAD_SHA/install.cjs" | node - --no-cli
+          node .github/scripts/check-install.cjs installed
+
+      - name: Re-run changes nothing
+        env:
+          SQL_TO_ERD_REPO: https://github.com/${{ env.HEAD_REPO }}.git
+          SQL_TO_ERD_REF: ${{ env.HEAD_REF }}
+        run: |
+          out=$(node - --no-cli --skip-npm < install.cjs)
+          echo "$out"
+          if echo "$out" | grep -E ': (wrote|updated) '; then echo "re-run changed a config"; exit 1; fi
+
+      - name: MCP server answers over stdio
+        run: |
+          out=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | node ~/.sql-to-erd/mcp/server.mjs)
+          echo "$out" | head -c 400; echo
+          echo "$out" | grep -q '"diagram_load_sql"'
+
+      - name: App starts with the MCP bridge
+        run: |
+          cd ~/.sql-to-erd
+          npx vite --port 5173 --strictPort > vite.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs http://localhost:5173/ > page.html && break; sleep 1; done
+          cat vite.log
+          grep -q '/mcp/bridge.js' page.html
+
+      - name: Uninstall
+        run: |
+          node - --uninstall --no-cli < install.cjs
+          node .github/scripts/check-install.cjs uninstalled

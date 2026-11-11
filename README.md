@@ -130,7 +130,10 @@ Windows PowerShell (use `curl.exe`, since `curl` there is a different command):
 curl.exe -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
 ```
 
-It needs Node 18+ and git. It clones the app to `~/.sql-to-erd` (or uses the
+It needs Node 18+ and git, and works on Linux, macOS and Windows (tested in CI by
+`.github/workflows/installer.yml`). Run it as your own user, not with `sudo`,
+or it sets up root's agents instead of yours. On Linux it follows
+`XDG_CONFIG_HOME` (default `~/.config`). It clones the app to `~/.sql-to-erd` (or uses the
 checkout you run `node install.cjs` from), runs `npm install`, then for every
 agent it finds it registers the `sql-to-erd` MCP server and copies the
 [`sql-to-erd` skill](skills/sql-to-erd/SKILL.md), which tells the AI how to use
@@ -142,7 +145,7 @@ the tools:
 | Claude Desktop | `claude_desktop_config.json` | — |
 | Cursor | `~/.cursor/mcp.json` | `~/.cursor/skills/` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/skills/` |
-| VS Code (Copilot) | user `mcp.json` | — |
+| VS Code (Copilot), Insiders, VSCodium | user `mcp.json` | — |
 | Codex | `~/.codex/config.toml` | `~/.agents/skills/` |
 | Gemini CLI | `~/.gemini/settings.json` | `~/.agents/skills/` |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.agents/skills/` |
