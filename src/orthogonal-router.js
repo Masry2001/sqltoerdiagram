@@ -713,6 +713,59 @@ export function moveSegment(path, i, value, from, to) {
   return { points: simplifyPath(next), fromSide: path.fromSide, toSide: path.toSide, hand: true };
 }
 
+// Whether a table's side looks away from another table: the other table lies
+// entirely behind it (a line leaving that side would have to turn back).
+export function sideFacesAway(table, side, other) {
+  if (!table || !other || table === other) return false;
+  if (side === 'right') return other.x + other.w <= table.x;
+  if (side === 'left') return other.x >= table.x + table.w;
+  if (side === 'bottom') return other.y + other.h <= table.y;
+  if (side === 'top') return other.y >= table.y + table.h;
+  return false;
+}
+
+// A line shaped by hand, after its tables moved by fromDelta / toDelta
+// ([dx, dy], the tables' new spots are from / to). When both tables moved the
+// same way the whole line moves with them. Otherwise each end moves with its
+// table and the segment touching it stretches, while every other bend stays.
+// Returns the new path (still marked as shaped by hand), or null when the shape
+// no longer works: it would cross a table (tables: every visible table) or turn
+// back into its own table.
+export function followMove(path, from, to, fromDelta, toDelta, tables = []) {
+  const pts = path?.points;
+  if (!Array.isArray(pts) || pts.length < 2 || !from || !to) return null;
+  const snap = (v) => Math.round(v / GRID) * GRID;
+  const together = fromDelta[0] === toDelta[0] && fromDelta[1] === toDelta[1];
+  const shift = together ? [snap(fromDelta[0]), snap(fromDelta[1])] : [0, 0];
+  const next = pts.map(([x, y]) => [x + shift[0], y + shift[1]]);
+  const last = next.length - 1;
+  // an end: on its table's side, at its old spot along the side (moved with the
+  // table and kept on the grid, away from the corners)
+  const place = (i, table, side, delta, old) => {
+    const across = side === 'left' || side === 'right';       // the side runs up and down
+    const k = across ? 1 : 0;                                  // the coordinate along the side
+    const start = across ? table.y : table.x, size = across ? table.h : table.w;
+    const lo = Math.ceil((start + 6) / GRID) * GRID, hi = Math.floor((start + size - 6) / GRID) * GRID;
+    if (lo > hi) return false;
+    next[i][k] = Math.min(hi, Math.max(lo, together ? old[k] + shift[k] : snap(old[k] + delta[k])));
+    next[i][1 - k] = side === 'left' ? table.x : side === 'right' ? table.x + table.w : side === 'top' ? table.y : table.y + table.h;
+    // the point next to it keeps the segment square to the side
+    const j = i === 0 ? 1 : last - 1;
+    if (j !== i && j > 0 && j < last) next[j][k] = next[i][k];
+    return true;
+  };
+  if (!place(0, from, path.fromSide, fromDelta, pts[0]) || !place(last, to, path.toSide, toDelta, pts[last])) return null;
+  const out = simplifyPath(next);
+  // still square, still leaving each table outwards, and clear of every table
+  for (let i = 1; i < out.length; i++) if (out[i - 1][0] !== out[i][0] && out[i - 1][1] !== out[i][1]) return null;
+  if (out.length < 2) return null;
+  const leaves = (a, b, side) => (b[0] - a[0]) * OUT[side][0] + (b[1] - a[1]) * OUT[side][1] > 0;
+  if (!leaves(out[0], out[1], path.fromSide) || !leaves(out[out.length - 1], out[out.length - 2], path.toSide)) return null;
+  const result = { points: out, fromSide: path.fromSide, toSide: path.toSide, hand: true };
+  if (!pathStillFits(result, from, to) || pathUnderTables(out, tables)) return null;
+  return result;
+}
+
 // The segment of a path nearest to a point: { index, distance }.
 export function nearestSegment(points, x, y) {
   let best = { index: -1, distance: Infinity };

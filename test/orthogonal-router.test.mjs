@@ -1,5 +1,5 @@
 // Tests for "Arrange lines straight". Run: node test/orthogonal-router.test.mjs
-import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps, moveSegment, nearestSegment } from '../src/orthogonal-router.js';
+import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps, moveSegment, nearestSegment, followMove, sideFacesAway } from '../src/orthogonal-router.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error('  ✗ ' + msg); } };
@@ -189,6 +189,29 @@ function throughTable(paths, map) {
   const straight = moveSegment(path, 2, 0, from, to);
   ok(straight && orthogonal({ straight }), 'moving a segment never tilts the line');
   ok(nearestSegment(path.points, 360, 200).index === 2, 'the segment nearest a point is found');
+}
+
+// a line shaped by hand follows its tables when they move
+{
+  const from = table('f', 0, 0, 200, 160), to = table('g', 500, 300, 200, 160);
+  const shaped = { points: [[200, 80], [416, 80], [416, 384], [500, 384]], fromSide: 'right', toSide: 'left', hand: true };
+  // both tables move together: the whole line moves with them
+  const both = followMove(shaped, { ...from, x: 64, y: 32 }, { ...to, x: 564, y: 332 }, [64, 32], [64, 32]);
+  ok(both && JSON.stringify(both.points) === JSON.stringify([[264, 112], [480, 112], [480, 416], [564, 416]]), 'a line moves with two tables moved together');
+  // one table nudged up: its end moves with it, the bend in the middle stays
+  const up = { ...from, y: -48 };
+  const one = followMove(shaped, up, to, [0, -48], [0, 0]);
+  ok(one && one.hand && one.points[0][1] === 32 && one.points[1][0] === 416 && one.points[2][0] === 416, 'one table moved: its end follows, the other bends stay');
+  ok(orthogonal({ one }) && pathStillFits(one, up, to), 'the followed line is square and meets both tables');
+  // the table moved past the bend: the shape no longer works
+  ok(followMove(shaped, { ...from, x: 300 }, to, [300, 0], [0, 0]) === null, 'a shape that would turn back into its table is given up');
+  // a table now under the shape: given up too
+  const wall = table('w', 380, 150, 100, 100);
+  ok(followMove(shaped, up, to, [0, -48], [0, 0], [up, to, wall]) === null, 'a shape that would cross a table is given up');
+  // sides that look away from the other table
+  ok(sideFacesAway(table('a', 600, 0), 'right', table('b', 0, 0)), 'a right side looks away from a table on the left');
+  ok(!sideFacesAway(table('a', 0, 0), 'right', table('b', 600, 0)), 'a right side looks toward a table on the right');
+  ok(!sideFacesAway(table('a', 0, 0), 'bottom', table('b', 600, 0)), 'a bottom side next to a table beside it is fine');
 }
 
 console.log(`orthogonal router: ${pass} passed, ${fail} failed`);

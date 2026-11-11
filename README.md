@@ -41,8 +41,8 @@ Details are in [MCP](#mcp) below.
 - **Lines you can edit**: click a line to pin it (everything else dims), drag its
   middle to bend it, drag either end to move where it enters or leaves a table.
   On a straight line, drag any segment sideways to shape the line yourself: it
-  stays as you left it (also through **Arrange lines straight**) until one of its
-  tables moves, and a double-click on it makes it automatic again.
+  stays as you left it, also through **Arrange lines straight**, and a
+  double-click on it makes it automatic again.
   Press **Delete** to remove a pinned manual link. A table's right-click menu lists
   its manual links, so each one can be removed on its own.
 - **Groups**: the group name is always drawn on top. A group moves only when you
@@ -56,6 +56,11 @@ Details are in [MCP](#mcp) below.
   undo history. (The store comes from the upstream project.)
 - **Straight lines stay straight**: after **Arrange lines straight**, moving a
   table, a group or a line end re-routes only the lines that need it.
+- **Your choices survive moves**: when a table moves, its automatic entry points
+  pick their side again, but an end you placed keeps its side (unless that side
+  now looks away from the other table), and a line you shaped keeps its shape:
+  it moves whole with a group, and with one table only the end on that table
+  follows. If the shape would cross a table it is redrawn, keeping your sides.
 - **Search**: **Ctrl + F** finds tables and fields and jumps to them.
 - **Undo / redo**: **Ctrl + Z**, **Ctrl + Y** (or **Ctrl + Shift + Z**). Arrange
   asks before re-arranging tables that are in groups.

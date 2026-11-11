@@ -7,7 +7,7 @@ import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
-import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved, moveSegment, nearestSegment } from './orthogonal-router.js';
+import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved, moveSegment, nearestSegment, followMove, sideFacesAway } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
 const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
@@ -706,14 +706,20 @@ export class Diagram {
       bends = {};
     }
     const moving = this._movingKeys();
+    let followed = null;
     if (moving.size) {
+      // lines of the moved tables: automatic ends choose again; ends placed by
+      // hand keep their side, and lines shaped by hand follow their tables
+      const kept = this._handAfterMove(moving);
+      followed = kept.paths;
       anchors = { ...anchors }; bends = { ...bends }; looseIds = new Set();
       for (const e of edges) {
         if (!moving.has(e.fromKey) && !moving.has(e.toKey)) continue;
         const id = `${e.fromKey}.${e.fromCol}>${e.toKey}.${e.toCol}`;
         looseIds.add(id);
         delete anchors[id];
-        delete bends[id];
+        if (bends[id]?.arranged) delete bends[id];
+        if (kept.anchors[id]) anchors[id] = kept.anchors[id];
       }
     }
     const routes = routeEdges(edges, byKey, (key) => this.hidden.has(key), bends, anchors);
@@ -724,7 +730,7 @@ export class Diagram {
     const chosen = [];
     for (const seg of routes) {
       // lines of a table being dragged use the routes found while dragging
-      let path = looseIds?.has(seg.id) ? (this._livePaths?.[seg.id] ?? null) : this.edgePaths[seg.id];
+      let path = looseIds?.has(seg.id) ? (followed[seg.id] ?? this._livePaths?.[seg.id] ?? null) : this.edgePaths[seg.id];
       if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
         if (!straightMode) continue;
         path = elbowPath(seg);
@@ -870,22 +876,28 @@ export class Diagram {
     if (!keys.size) return null;
     const { tables, edges, groups } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
-    const todo = [], keep = {};
+    const kept = this._handAfterMove(keys);
+    const todo = [], keep = {}, anchors = {};
     for (const e of edges) {
-      if (keys.has(e.fromKey) || keys.has(e.toKey)) { todo.push(e); continue; }
+      if (kept.paths[e.id]) { keep[e.id] = kept.paths[e.id]; continue; }   // follows its tables as shaped
+      if (keys.has(e.fromKey) || keys.has(e.toKey)) {
+        todo.push(e);
+        if (kept.anchors[e.id]) anchors[e.id] = kept.anchors[e.id];
+        continue;
+      }
       const p = this.edgePaths[e.id];
       if (p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey))) keep[e.id] = p;
     }
-    return todo.length ? { tables, byKey, todo, keep, groups } : null;
+    return todo.length ? { tables, byKey, todo, keep, anchors, groups, followed: kept.paths } : null;
   }
 
   _liveRouteInPage() {
     const input = this._liveInput();
     if (!input) return;
     const started = performance.now();
-    const { paths } = routeMoved(input.todo, input.byKey, { keep: input.keep, groups: input.groups, isHidden: (k) => this.hidden.has(k) });
+    const { paths } = routeMoved(input.todo, input.byKey, { anchors: input.anchors, keep: input.keep, groups: input.groups, isHidden: (k) => this.hidden.has(k) });
     if (this._live) this._live.slowMs = performance.now() - started;
-    this._livePaths = paths;
+    this._livePaths = { ...input.followed, ...paths };
     this.markDirty();
   }
 
@@ -898,7 +910,7 @@ export class Diagram {
     live.pending = false;
     live.worker.onmessage = (event) => {
       if (this._live !== live) return;               // the drag ended
-      this._livePaths = event.data.paths;
+      this._livePaths = { ...input.followed, ...event.data.paths };
       this.markDirty();
       if (event.data.partial) return;               // the careful pass follows
       live.busy = false;
@@ -906,7 +918,7 @@ export class Diagram {
       if (live.pending) this._liveRouteInWorker();
     };
     live.worker.onerror = (err) => { live.busy = false; console.error('live routing failed', err); };
-    live.worker.postMessage({ tables: input.tables, edges: input.todo, anchors: {}, keep: input.keep, groups: input.groups, moved: true, hidden: [...this.hidden] });
+    live.worker.postMessage({ tables: input.tables, edges: input.todo, anchors: input.anchors, keep: input.keep, groups: input.groups, moved: true, hidden: [...this.hidden] });
   }
 
   _stopLiveRoute() {
@@ -920,6 +932,10 @@ export class Diagram {
   // lines are re-routed; arranged curved lines are re-arranged.
   _linesAfterMove(keys, livePaths = null) {
     if (!keys.size) return;
+    // what the user placed by hand, worked out from the lines as they were
+    // before the move (the routes found while dragging come in below)
+    const kept = this._handAfterMove(keys);
+    this._moveStart = null;
     // routes found while dragging that match where the tables were dropped
     // are kept on screen while the final routing runs, so nothing jumps
     const settled = new Set();         // lines whose route from the drag already fits
@@ -930,11 +946,51 @@ export class Diagram {
         if (pathStillFits(p, byKey.get(f), byKey.get(t))) { this.edgePaths[id] = p; settled.add(id); }
       }
     }
-    // a moved table's lines start over: entry points and bends on them are
-    // released, including ones placed by hand (drag an end again to fine-tune)
-    for (const id of this._lineIdsOf(keys)) { delete this.edgeAnchors[id]; delete this.edgeBends[id]; }
+    // a moved table's lines: automatic entry points choose again. Ends placed
+    // by hand keep their side (unless it now looks away from the other table),
+    // and a line shaped by hand keeps its shape when it still can.
+    for (const id of this._lineIdsOf(keys)) {
+      delete this.edgeAnchors[id];
+      if (this.edgeBends[id]?.arranged) delete this.edgeBends[id];
+      if (kept.anchors[id]) this.edgeAnchors[id] = kept.anchors[id];
+      if (kept.paths[id]) { this.edgePaths[id] = kept.paths[id]; settled.add(id); }
+      else if (this.edgePaths[id]?.hand) { delete this.edgePaths[id]; settled.delete(id); }
+    }
     if (this.isStraightMode()) this.rerouteStraight(keys, settled);
     else this._rearrangeLinesOf(keys);
+  }
+
+  // What the user placed by hand on the lines of moved tables, and still
+  // applies where the tables are now: { anchors: ends placed by hand whose side
+  // still looks toward the other table, paths: lines shaped by hand that follow
+  // their tables }. The sides of a shaped line count as ends placed by hand.
+  _handAfterMove(keys) {
+    const byKey = this._tableMap();
+    const start = this._moveStart;
+    const visible = this.model.tables.filter((t) => Number.isFinite(t.x) && !this.hidden.has(t.key));
+    const anchors = {}, paths = {};
+    const anchorOn = ([x, y], t, side) => ({ side, t: side === 'left' || side === 'right' ? (y - t.y) / t.h : (x - t.x) / t.w });
+    for (const id of this._lineIdsOf(keys)) {
+      const [fk, tk] = id.split('>').map((s) => s.slice(0, s.lastIndexOf('.')));
+      const from = byKey.get(fk), to = byKey.get(tk);
+      if (!from || !to) continue;
+      const ends = { ...(handEnds(this.edgeAnchors[id]) || {}) };
+      const p = this.edgePaths[id];
+      if (p?.hand && start) {
+        const old = (t) => { const s = start.get(t.key); return { ...t, x: s ? s[0] : t.x, y: s ? s[1] : t.y }; };
+        ends.from = anchorOn(p.points[0], old(from), p.fromSide);
+        ends.to = anchorOn(p.points[p.points.length - 1], old(to), p.toSide);
+      }
+      const keepFrom = ends.from && !sideFacesAway(from, ends.from.side, to);
+      const keepTo = ends.to && !sideFacesAway(to, ends.to.side, from);
+      if (keepFrom || keepTo) anchors[id] = { ...(keepFrom ? { from: ends.from } : {}), ...(keepTo ? { to: ends.to } : {}) };
+      if (p?.hand && start && keepFrom && keepTo) {
+        const delta = (t) => { const s = start.get(t.key); return s ? [t.x - s[0], t.y - s[1]] : [0, 0]; };
+        const next = followMove(p, from, to, delta(from), delta(to), visible);
+        if (next) paths[id] = next;
+      }
+    }
+    return { anchors, paths };
   }
 
   // Ids of every line attached to one of the tables.
@@ -962,15 +1018,11 @@ export class Diagram {
       edges.push({ fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(), fromCol: r.fromCols[0], toCol: r.toCols[0] });
     }
     for (const l of this.manualLinks) edges.push({ fromKey: l.from.table, toKey: l.to.table, fromCol: l.from.col, toCol: l.to.col });
-    const touching = new Set(edges
-      .filter((e) => keys.has(e.fromKey) || keys.has(e.toKey))
-      .map((e) => `${e.fromKey}.${e.fromCol}>${e.toKey}.${e.toCol}`));
+    // the moved tables' lines only have their ends and bends placed by hand
+    // left (automatic ones were released), and those stay
     const anchors = {}, keepAnchors = {};
-    for (const [id, ends] of Object.entries(this.edgeAnchors)) {
-      if (!touching.has(id)) { anchors[id] = ends; keepAnchors[id] = ends; }
-    }
-    const bends = {};
-    for (const [id, b] of Object.entries(this.edgeBends)) if (!touching.has(id)) bends[id] = b;
+    for (const [id, ends] of Object.entries(this.edgeAnchors)) { anchors[id] = ends; keepAnchors[id] = ends; }
+    const bends = { ...this.edgeBends };
     const result = arrangeLines(edges, byKey, { keepAnchors, keepBends: bends, isHidden: (k) => this.hidden.has(k) });
     this.edgeAnchors = { ...anchors, ...result.anchors };
     this.edgeBends = { ...bends, ...result.bends };
@@ -1555,6 +1607,9 @@ export class Diagram {
   // `additive` (Shift) drives multi-select: Shift+click toggles a table,
   // Shift+drag on empty draws a marquee box.
   _pointerDown(sx, sy, additive = false, allowConnect = true) {
+    // where every table was when the press began: a line shaped by hand
+    // follows its tables by how far they moved
+    this._moveStart = new Map(this.model.tables.map((t) => [t.key, [t.x, t.y]]));
     this.pressEdge = null;
     // 0) the delete button and bend handle of the clicked line
     const deleteSeg = this._edgeDeleteAt(sx, sy);
