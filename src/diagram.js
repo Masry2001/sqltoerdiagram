@@ -690,10 +690,16 @@ export class Diagram {
         manual: true, card: null, link: l,
       });
     }
-    // While tables are being dragged, their lines let go of the entry points
-    // "Arrange lines" gave them (ends placed by hand stay), so each line follows
-    // the table and enters from the side that faces the other table.
+    // While tables are being dragged, their lines let go of their entry points
+    // and bends, so each line follows the table and enters from the side that
+    // faces the other table. In straight mode, entry points left over from the
+    // curved "Arrange lines" don't apply at all.
     let anchors = this.edgeAnchors, bends = this.edgeBends, looseIds = null;
+    if (this.isStraightMode()) {
+      anchors = {};
+      for (const [id, ends] of Object.entries(this.edgeAnchors)) { const hand = handEnds(ends); if (hand) anchors[id] = hand; }
+      bends = {};
+    }
     const moving = this._movingKeys();
     if (moving.size) {
       anchors = { ...anchors }; bends = { ...bends }; looseIds = new Set();
@@ -701,9 +707,8 @@ export class Diagram {
         if (!moving.has(e.fromKey) && !moving.has(e.toKey)) continue;
         const id = `${e.fromKey}.${e.fromCol}>${e.toKey}.${e.toCol}`;
         looseIds.add(id);
-        const hand = handEnds(anchors[id]);
-        if (hand) anchors[id] = hand; else delete anchors[id];
-        if (bends[id]?.arranged) delete bends[id];
+        delete anchors[id];
+        delete bends[id];
       }
     }
     const routes = routeEdges(edges, byKey, (key) => this.hidden.has(key), bends, anchors);
@@ -792,6 +797,12 @@ export class Diagram {
     const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges, anchors, keep: {} });
     if (run === this._straightRun) {
       this.edgePaths = paths;
+      // entry points and bends from the curved "Arrange lines" don't apply to
+      // straight lines; ones placed by hand are kept
+      const hand = {};
+      for (const [id, ends] of Object.entries(this.edgeAnchors)) { const h = handEnds(ends); if (h) hand[id] = h; }
+      this.edgeAnchors = hand;
+      this.edgeBends = Object.fromEntries(Object.entries(this.edgeBends).filter(([, b]) => !b.arranged));
       this.pinnedEdge = null;
       this.markDirty();
       this.onLayoutChange?.();
@@ -813,8 +824,24 @@ export class Diagram {
   // lines are re-routed; arranged curved lines are re-arranged.
   _linesAfterMove(keys) {
     if (!keys.size) return;
+    // a moved table's lines start over: entry points and bends on them are
+    // released, including ones placed by hand (drag an end again to fine-tune)
+    for (const id of this._lineIdsOf(keys)) { delete this.edgeAnchors[id]; delete this.edgeBends[id]; }
     if (this.isStraightMode()) this.rerouteStraight(keys);
     else this._rearrangeLinesOf(keys);
+  }
+
+  // Ids of every line attached to one of the tables.
+  _lineIdsOf(keys) {
+    const ids = [];
+    for (const r of this.model.relations) {
+      const f = r.fromTable.toLowerCase(), t = r.toTable.toLowerCase();
+      if (keys.has(f) || keys.has(t)) ids.push(`${f}.${r.fromCols[0]}>${t}.${r.toCols[0]}`);
+    }
+    for (const l of this.manualLinks) {
+      if (keys.has(l.from.table) || keys.has(l.to.table)) ids.push(`${l.from.table}.${l.from.col}>${l.to.table}.${l.to.col}`);
+    }
+    return ids;
   }
 
   // Curved mode: re-arrange only the lines of the moved tables, around every
@@ -834,11 +861,10 @@ export class Diagram {
       .map((e) => `${e.fromKey}.${e.fromCol}>${e.toKey}.${e.toCol}`));
     const anchors = {}, keepAnchors = {};
     for (const [id, ends] of Object.entries(this.edgeAnchors)) {
-      const keep = touching.has(id) ? handEnds(ends) : ends;
-      if (keep) { anchors[id] = keep; keepAnchors[id] = keep; }
+      if (!touching.has(id)) { anchors[id] = ends; keepAnchors[id] = ends; }
     }
     const bends = {};
-    for (const [id, b] of Object.entries(this.edgeBends)) if (!(touching.has(id) && b.arranged)) bends[id] = b;
+    for (const [id, b] of Object.entries(this.edgeBends)) if (!touching.has(id)) bends[id] = b;
     const result = arrangeLines(edges, byKey, { keepAnchors, keepBends: bends, isHidden: (k) => this.hidden.has(k) });
     this.edgeAnchors = { ...anchors, ...result.anchors };
     this.edgeBends = { ...bends, ...result.bends };
@@ -890,10 +916,27 @@ export class Diagram {
     }
     if (!todo.length) return { routed: 0 };
     const run = ++this._straightRun;
-    const job = this._runStraightWorker({ tables, edges: todo, anchors, keep }).then(({ paths }) => {
+    const route = async () => {
+      const first = await this._runStraightWorker({ tables, edges: todo, anchors, keep });
+      if (!first.failed.length) return { paths: first.paths, routed: todo };
+      // a line found no free spot (a busy table's sides are taken by kept
+      // lines): route every line of those tables again, together
+      const full = new Set();
+      for (const id of first.failed) { const e = todo.find((x) => x.id === id); if (e) { full.add(e.fromKey); full.add(e.toKey); } }
+      const keep2 = {}, todo2 = [...todo];
+      for (const e of edges) {
+        if (!keep[e.id]) continue;
+        if (full.has(e.fromKey) || full.has(e.toKey)) todo2.push(e);
+        else keep2[e.id] = keep[e.id];
+      }
+      if (run !== this._straightRun || todo2.length === todo.length) return { paths: first.paths, routed: todo };
+      const second = await this._runStraightWorker({ tables, edges: todo2, anchors, keep: keep2 });
+      return second.failed.length <= first.failed.length ? { paths: second.paths, routed: todo2 } : { paths: first.paths, routed: todo };
+    };
+    const job = route().then(({ paths, routed }) => {
       // a newer move, an undo, or a switch back to curves happened meanwhile
       if (run !== this._straightRun || !this.isStraightMode()) return null;
-      for (const e of todo) delete this.edgePaths[e.id];
+      for (const e of routed) delete this.edgePaths[e.id];
       Object.assign(this.edgePaths, paths);
       this.markDirty();
       if (this.onLinesRerouted) this.onLinesRerouted();
