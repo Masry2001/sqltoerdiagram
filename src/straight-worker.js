@@ -3,11 +3,11 @@
 import { routeStraight, routeMoved } from './orthogonal-router.js';
 
 self.onmessage = (event) => {
-  const { tables, edges, anchors, hidden, keep, moved } = event.data;
+  const { tables, edges, anchors, hidden, keep, moved, groups } = event.data;
   const byKey = new Map(tables.map((t) => [t.key, t]));
   const hiddenKeys = new Set(hidden);
   const started = performance.now();
-  const opts = { anchors, keep, isHidden: (k) => hiddenKeys.has(k) };
+  const opts = { anchors, keep, groups, isHidden: (k) => hiddenKeys.has(k) };
   // lines of moved tables: the quick pass is sent first, then the final result
   const result = moved
     ? routeMoved(edges, byKey, opts, (quick) => self.postMessage({ ...quick, partial: true }))

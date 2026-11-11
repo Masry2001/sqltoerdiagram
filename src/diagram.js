@@ -789,7 +789,9 @@ export class Diagram {
       if (ends.to && !ends.to.arranged) hand.to = ends.to;
       if (hand.from || hand.to) anchors[id] = hand;
     }
-    return { tables, edges, anchors };
+    // group boxes: lines keep out of groups that hold neither of their tables
+    const groups = this.annotations.filter((a) => a.type === 'group').map((a) => ({ x: a.x, y: a.y, w: a.w, h: a.h }));
+    return { tables, edges, anchors, groups };
   }
 
   _runStraightWorker(message) {
@@ -797,7 +799,7 @@ export class Diagram {
       const worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
       worker.onmessage = (event) => { if (event.data.partial) return; worker.terminate(); resolve(event.data); };
       worker.onerror = (err) => { worker.terminate(); reject(err); };
-      worker.postMessage({ ...message, hidden: [...this.hidden] });
+      worker.postMessage({ groups: this._straightInput().groups, ...message, hidden: [...this.hidden] });
     });
   }
 
@@ -854,7 +856,7 @@ export class Diagram {
   _liveInput() {
     const keys = this._movingKeys();
     if (!keys.size) return null;
-    const { tables, edges } = this._straightInput();
+    const { tables, edges, groups } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
     const todo = [], keep = {};
     for (const e of edges) {
@@ -862,14 +864,14 @@ export class Diagram {
       const p = this.edgePaths[e.id];
       if (p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey))) keep[e.id] = p;
     }
-    return todo.length ? { tables, byKey, todo, keep } : null;
+    return todo.length ? { tables, byKey, todo, keep, groups } : null;
   }
 
   _liveRouteInPage() {
     const input = this._liveInput();
     if (!input) return;
     const started = performance.now();
-    const { paths } = routeMoved(input.todo, input.byKey, { keep: input.keep, isHidden: (k) => this.hidden.has(k) });
+    const { paths } = routeMoved(input.todo, input.byKey, { keep: input.keep, groups: input.groups, isHidden: (k) => this.hidden.has(k) });
     if (this._live) this._live.slowMs = performance.now() - started;
     this._livePaths = paths;
     this.markDirty();
@@ -888,10 +890,11 @@ export class Diagram {
       this.markDirty();
       if (event.data.partial) return;               // the careful pass follows
       live.busy = false;
+      live.slowMs = event.data.ms;                  // fast again: back to routing in the page
       if (live.pending) this._liveRouteInWorker();
     };
     live.worker.onerror = (err) => { live.busy = false; console.error('live routing failed', err); };
-    live.worker.postMessage({ tables: input.tables, edges: input.todo, anchors: {}, keep: input.keep, moved: true, hidden: [...this.hidden] });
+    live.worker.postMessage({ tables: input.tables, edges: input.todo, anchors: {}, keep: input.keep, groups: input.groups, moved: true, hidden: [...this.hidden] });
   }
 
   _stopLiveRoute() {

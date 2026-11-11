@@ -28,7 +28,8 @@ function scratch(name, Type, length, clear) {
 }
 const CLEARANCE = GRID;        // space kept free around every table
 const PAD_CELLS = 24;          // free border around the whole diagram
-const BEND_COST = 4;
+const BEND_COST = 16;            // a turn costs as much as this many extra steps
+const GROUP_COST = 6;           // each step inside a group the line doesn't belong to
 const CROSS_COST = 3;
 const SOFT_OVERLAP_COST = 60;  // last resort when no clean path exists
 const WINDOW_CELLS = 40;       // first search stays near the two tables
@@ -94,7 +95,9 @@ class MinHeap {
 // area: optional {x0, y0, x1, y1}; only tables there (and the lines' own
 //   tables) are considered, which keeps the grid small and routing fast.
 // fast: quicker, slightly less tidy routes (used while tables are moved).
-export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false } = {}) {
+// groups: [{x, y, w, h}] group boxes; a line avoids crossing a group that
+//   holds neither of its two tables (it can, when there is no other way).
+export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false, groups = [] } = {}) {
   let tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !isHidden(t.key));
   if (area) {
     const own = new Set(edges.flatMap((e) => [e.fromKey, e.toKey]));
@@ -125,12 +128,28 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) blocked[at(c, r)] = 1;
   }
 
+  // ---- groups: which group box each cell is in (the innermost one) ----
+  const boxes = groups.filter((g) => [g.x, g.y, g.w, g.h].every(Number.isFinite) && g.w > 0 && g.h > 0)
+    .map((g, i) => ({ ...g, id: i + 1 }))
+    .sort((a, b) => b.w * b.h - a.w * a.h);
+  const groupAt = scratch('groupAt', Uint16Array, size, true);
+  for (const g of boxes) {
+    const c0 = Math.max(0, Math.ceil((g.x - ox) / GRID)), c1 = Math.min(cols - 1, Math.floor((g.x + g.w - ox) / GRID));
+    const r0 = Math.max(0, Math.ceil((g.y - oy) / GRID)), r1 = Math.min(rows - 1, Math.floor((g.y + g.h - oy) / GRID));
+    for (let r = r0; r <= r1; r++) groupAt.fill(g.id, at(c0, r), at(c1, r) + 1);
+  }
+  // the groups a table belongs to (its centre is inside the box)
+  const groupsOf = (t) => {
+    const cx = t.x + t.w / 2, cy = t.y + t.h / 2;
+    return boxes.filter((g) => cx >= g.x && cx <= g.x + g.w && cy >= g.y && cy <= g.y + g.h).map((g) => g.id);
+  };
+
   // ---- ports: every end gets its own grid line on a side ----
   const work = [];
   for (const edge of edges) {
     const from = byKey.get(edge.fromKey), to = byKey.get(edge.toKey);
     if (!from || !to || !Number.isFinite(from.x) || !Number.isFinite(to.x) || isHidden(from.key) || isHidden(to.key)) continue;
-    work.push({ edge, id: edge.id, from, to, ends: {} });
+    work.push({ edge, id: edge.id, from, to, ends: {}, home: boxes.length ? new Set([...groupsOf(from), ...groupsOf(to)]) : null });
   }
 
   const hOwner = scratch('hOwner', Int32Array, size, true);      // edge (c,r)-(c+1,r)
@@ -270,7 +289,9 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   function search(item, owner, start, goal, window, soft, limit = MAX_EXPANSIONS, w = 1) {
     searchId = (searchId + 1) | 0 || 1;
     const heap = new MinHeap();
-    const h = (c, r) => Math.abs(c - goal.c) + Math.abs(r - goal.r);
+    // distance, plus one turn when the goal isn't straight ahead on a line
+    const h = (c, r) => Math.abs(c - goal.c) + Math.abs(r - goal.r) + (c !== goal.c && r !== goal.r ? BEND_COST : 0);
+    const home = item.home;
     const startDir = DIRS.findIndex(([dx, dy]) => dx === OUT[item.ends.from.side][0] && dy === OUT[item.ends.from.side][1]);
     const s0 = at(start.c, start.r) * 4 + startDir;
     stamp[s0] = searchId; gScore[s0] = 0; parent[s0] = -1;
@@ -307,6 +328,8 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
           ? (vOwner[ncell] || (nr > 0 && vOwner[at(nc, nr - 1)]))
           : (hOwner[ncell] || (nc > 0 && hOwner[at(nc - 1, nr)]));
         if (crossOwners && crossOwners !== owner) cost += CROSS_COST;
+        const grp = groupAt[ncell];
+        if (grp && !home?.has(grp)) cost += GROUP_COST;
         if (ncell === goalCell && nd !== inDir) cost += BEND_COST;
         const next = ncell * 4 + nd;
         const ng = g + cost;
@@ -567,12 +590,12 @@ function simplifyPath(points) {
 // (reported through onQuick, so they can be shown at once), then the careful
 // search for the few lines the quick pass couldn't route, around the others.
 // Holding a table and letting it go both use this, so they give the same lines.
-export function routeMoved(edges, byKey, { anchors = {}, isHidden = () => false, keep = {} } = {}, onQuick = null) {
-  const quick = routeStraight(edges, byKey, { anchors, isHidden, keep, fast: true });
+export function routeMoved(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, groups = [] } = {}, onQuick = null) {
+  const quick = routeStraight(edges, byKey, { anchors, isHidden, keep, groups, fast: true });
   if (!quick.failed.length) return quick;
   onQuick?.(quick);
   const rest = edges.filter((e) => quick.failed.includes(e.id));
-  const careful = routeStraight(rest, byKey, { anchors, isHidden, keep: { ...keep, ...quick.paths } });
+  const careful = routeStraight(rest, byKey, { anchors, isHidden, groups, keep: { ...keep, ...quick.paths } });
   return {
     paths: { ...quick.paths, ...careful.paths },
     failed: careful.failed,
