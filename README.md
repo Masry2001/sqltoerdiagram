@@ -3,11 +3,30 @@
 **A free, open-source online ERD generator.** Paste a SQL schema (`CREATE TABLE`
 statements) → get a clean, interactive entity-relationship diagram.
 
-![deps](https://img.shields.io/badge/deps-2-blue) ![bundle](https://img.shields.io/badge/bundle-32KB%20gzip-brightgreen)
+![deps](https://img.shields.io/badge/deps-2-blue) ![bundle](https://img.shields.io/badge/bundle-32KB%20gzip-brightgreen) [![Installer](https://github.com/Masry2001/sqltoerdiagram/actions/workflows/installer.yml/badge.svg)](https://github.com/Masry2001/sqltoerdiagram/actions/workflows/installer.yml)
 
 **100% local · no signup · no upload.** It runs entirely in your browser, so your
 schema never leaves your machine — no server, no backend. Live at
 **[sqltoerdiagram.com](https://sqltoerdiagram.com)**.
+
+## Quick start with an AI agent
+
+One command installs the app and connects it to every AI agent on your machine
+(Claude Code, Cursor, Codex, VS Code, Gemini CLI, OpenCode, Windsurf, Kiro,
+Claude Desktop):
+
+```bash
+# Linux / macOS / Git Bash
+curl -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
+```
+
+```powershell
+# Windows PowerShell
+curl.exe -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
+```
+
+Then restart your agent and ask it: *"Draw an ER diagram from schema.sql"*.
+Details are in [MCP](#mcp) below.
 
 ## What this fork adds
 
@@ -116,25 +135,33 @@ npm run dev      # http://localhost:5173
 
 ## MCP
 
-### One-command install (all AI agents)
+`mcp/server.mjs` is an MCP server (stdio) that lets an AI agent drive the diagram
+open at `http://localhost:5173`. It can draw a schema from SQL, open and save
+projects, arrange tables and lines, group tables into boxes, add or remove links,
+add notes, and take screenshots to check the layout.
 
-macOS / Linux / Git Bash:
+### 1. Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
-```
+You need **Node 18+** and **git**. Run the command as your normal user, not with
+`sudo` (with `sudo` it would set up root's agents instead of yours).
 
-Windows PowerShell (use `curl.exe`, since `curl` there is a different command):
+| System | Command |
+| --- | --- |
+| Linux, macOS, Git Bash | `curl -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs \| node -` |
+| Windows PowerShell | `curl.exe -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs \| node -` |
+| From a checkout | `npm run mcp:install` |
 
-```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node -
-```
+On Windows, type `curl.exe`: in PowerShell plain `curl` is a different command.
+CI runs the one-liner on Ubuntu, macOS and Windows on every change
+([`installer.yml`](.github/workflows/installer.yml)).
 
-It needs Node 18+ and git. It clones the app to `~/.sql-to-erd` (or uses the
-checkout you run `node install.cjs` from), runs `npm install`, then for every
-agent it finds it registers the `sql-to-erd` MCP server and copies the
-[`sql-to-erd` skill](skills/sql-to-erd/SKILL.md), which tells the AI how to use
-the tools:
+The installer:
+
+1. Clones the app to `~/.sql-to-erd` (or uses the checkout you run
+   `npm run mcp:install` from) and runs `npm install`.
+2. For every agent it finds, registers the `sql-to-erd` MCP server and copies
+   the [`sql-to-erd` skill](skills/sql-to-erd/SKILL.md), which tells the AI how
+   to use the tools:
 
 | Agent | MCP config | Skill |
 | --- | --- | --- |
@@ -142,33 +169,96 @@ the tools:
 | Claude Desktop | `claude_desktop_config.json` | — |
 | Cursor | `~/.cursor/mcp.json` | `~/.cursor/skills/` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/skills/` |
-| VS Code (Copilot) | user `mcp.json` | — |
+| VS Code (Copilot), Insiders, VSCodium | user `mcp.json` | — |
 | Codex | `~/.codex/config.toml` | `~/.agents/skills/` |
 | Gemini CLI | `~/.gemini/settings.json` | `~/.agents/skills/` |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.agents/skills/` |
 | Kiro | `~/.kiro/settings/mcp.json` | — |
 
-Existing config is merged, not replaced, and backed up once to
-`<file>.sql-to-erd.bak`. Re-running is safe. Add options after `node -`:
-`--dry-run`, `--uninstall`, `--only=cursor,codex`, `--dir=<path>`. From a checkout,
-`npm run mcp:install` does the same.
+On Linux, app config lives under `XDG_CONFIG_HOME` (default `~/.config`), for
+example `~/.config/Code/User/mcp.json` and `~/.config/opencode/opencode.json`.
 
-Then restart the agent, run `npm run dev` in the app folder, open
-`http://localhost:5173`, and ask: *"Draw an ER diagram from schema.sql"*.
+Your existing config is merged, never replaced, and each file is backed up once to
+`<file>.sql-to-erd.bak`. Running the installer again is safe: it only updates
+what changed.
+
+### 2. Use it
+
+1. Restart your AI agent so it loads the new MCP server.
+2. Start the app and keep it running:
+
+   ```bash
+   cd ~/.sql-to-erd && npm run dev
+   ```
+
+3. Open `http://localhost:5173` in **one** browser tab. The newest tab to connect
+   (or the last one focused) receives the commands.
+4. Ask your agent, for example:
+   - *"Draw an ER diagram from schema.sql"*
+   - *"Group these tables by business domain and straighten the lines"*
+   - *"Save the diagram to docs/erd.json"*
+
+### Options
+
+Add them after `node -` (for example `... | node - --dry-run`) or after
+`npm run mcp:install --`.
+
+| Option | What it does |
+| --- | --- |
+| `--dry-run` | Show what would change, change nothing |
+| `--uninstall` | Remove the MCP entries and skills (keeps the app folder) |
+| `--only=cursor,codex` | Only these agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `vscode`, `vscode-insiders`, `vscodium`, `codex`, `gemini`, `opencode`, `kiro` |
+| `--dir=<path>` | Put the app somewhere other than `~/.sql-to-erd` |
+| `--no-cli` | Edit config files directly instead of using an agent's own CLI |
+| `--skip-npm` | Don't run `npm install` |
+
+Environment variables: `SQL_TO_ERD_HOME` (app folder), `SQL_TO_ERD_REPO` and
+`SQL_TO_ERD_REF` (install from another fork or branch; set them on `node`, not
+on `curl`).
+
+### Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/install.cjs | node - --uninstall
+```
+
+This removes the MCP entries and skills. Delete `~/.sql-to-erd` yourself if you
+no longer want the app.
 
 ### Manual setup
 
-`mcp/server.mjs` is an MCP server (stdio) that controls the diagram open at
-`http://localhost:5173` in dev mode. It can load and save projects, arrange tables
-and lines, add or remove links, set groups and notes, and take screenshots.
+For an agent the installer doesn't know, register this stdio server
+(use absolute paths):
 
-1. Start the app with `npm run dev` and open it in **one** browser. The newest tab
-   to connect (or the last one focused) receives the commands.
-2. Register the server with Claude Code:
+```json
+{
+  "mcpServers": {
+    "sql-to-erd": { "command": "node", "args": ["/home/you/.sql-to-erd/mcp/server.mjs"] }
+  }
+}
+```
 
-   ```bash
-   claude mcp add sql-to-erd -- node /path/to/sqlToDiagram/mcp/server.mjs
-   ```
+Codex uses TOML in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.sql-to-erd]
+command = "node"
+args = ["/home/you/.sql-to-erd/mcp/server.mjs"]
+```
+
+Claude Code: `claude mcp add -s user sql-to-erd -- node ~/.sql-to-erd/mcp/server.mjs`
+
+### Troubleshooting
+
+- **`diagram_status` says `connected: false`**: the app isn't running or no tab
+  is open. Run `npm run dev` in the app folder and open `http://localhost:5173`.
+- **Port 5199 already in use**: another agent already runs the MCP server. Only
+  one copy can run at a time, so close the other agent's session.
+- **"isn't plain JSON (comments?)"**: that config file has comments (JSONC), so
+  the installer left it alone and printed the entry to add by hand.
+- **Agent can't find `node`**: the installer registers the absolute path of the
+  `node` that ran it. If you later remove that Node version (for example with
+  nvm), run the installer again.
 
 The page talks to the server through `127.0.0.1:5199` only, and only from the dev
 server's origin. The bridge isn't included in production builds.

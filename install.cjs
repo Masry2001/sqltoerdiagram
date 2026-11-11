@@ -55,8 +55,12 @@ const did = (msg) => console.log(`  ${DRY ? '[dry-run] ' : ''}${msg}`);
 function appDir() {
   if (opt('dir')) return path.resolve(opt('dir'));
   if (process.env.SQL_TO_ERD_HOME) return path.resolve(process.env.SQL_TO_ERD_HOME);
-  const here = path.resolve(path.dirname(__filename));
-  if (fs.existsSync(path.join(here, 'mcp', 'server.mjs'))) return here;
+  // Piped in, __filename is "[stdin]": its dirname would be the current folder,
+  // so only trust it when the script really is a file on disk.
+  if (fs.existsSync(__filename)) {
+    const here = path.dirname(path.resolve(__filename));
+    if (fs.existsSync(path.join(here, 'mcp', 'server.mjs'))) return here;
+  }
   return path.join(HOME, '.sql-to-erd');
 }
 const APP = appDir();
@@ -75,7 +79,9 @@ function run(cmd, args, opts = {}) {
   return res.status === 0;
 }
 function onPath(cmd) {
-  return spawnSync(IS_WIN ? 'where' : 'which', [cmd], { stdio: 'pipe' }).status === 0;
+  if (IS_WIN) return spawnSync('where', [cmd], { stdio: 'pipe' }).status === 0;
+  // `command -v` is POSIX and always there; `which` is missing on some minimal distros.
+  return spawnSync('sh', ['-c', 'command -v "$1" >/dev/null 2>&1', 'sh', cmd], { stdio: 'pipe' }).status === 0;
 }
 const exists = (p) => fs.existsSync(p);
 
@@ -164,9 +170,15 @@ const configHome = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const claudeDesktopDir =
   process.platform === 'darwin' ? path.join(HOME, 'Library', 'Application Support', 'Claude')
     : IS_WIN ? path.join(appData, 'Claude') : path.join(configHome, 'Claude');
-const vscodeUserDir =
-  process.platform === 'darwin' ? path.join(HOME, 'Library', 'Application Support', 'Code', 'User')
-    : IS_WIN ? path.join(appData, 'Code', 'User') : path.join(configHome, 'Code', 'User');
+const appConfigDir = (name) =>
+  process.platform === 'darwin' ? path.join(HOME, 'Library', 'Application Support', name)
+    : IS_WIN ? path.join(appData, name) : path.join(configHome, name);
+// VS Code, Insiders and VSCodium (common on Linux) keep user settings side by side.
+const vscodeFlavours = [
+  ['vscode', 'VS Code (Copilot)', 'Code'],
+  ['vscode-insiders', 'VS Code Insiders', 'Code - Insiders'],
+  ['vscodium', 'VSCodium', 'VSCodium'],
+].map(([id, label, dir]) => ({ id, label, userDir: path.join(appConfigDir(dir), 'User') }));
 
 const AGENTS = [
   {
@@ -206,12 +218,12 @@ const AGENTS = [
     skills: path.join(HOME, '.codeium', 'windsurf', 'skills'),
     apply: () => editJson(path.join(HOME, '.codeium', 'windsurf', 'mcp_config.json'), ['mcpServers'], stdio(), 'Windsurf'),
   },
-  {
-    id: 'vscode',
-    label: 'VS Code (Copilot)',
-    detect: () => exists(vscodeUserDir),
-    apply: () => editJson(path.join(vscodeUserDir, 'mcp.json'), ['servers'], { type: 'stdio', ...stdio() }, 'VS Code'),
-  },
+  ...vscodeFlavours.map(({ id, label, userDir }) => ({
+    id,
+    label,
+    detect: () => exists(userDir),
+    apply: () => editJson(path.join(userDir, 'mcp.json'), ['servers'], { type: 'stdio', ...stdio() }, label),
+  })),
   {
     id: 'codex',
     label: 'Codex',
@@ -271,6 +283,10 @@ function fetchApp() {
 function main() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 18) throw new Error(`Node 18 or newer is required (found ${process.version}).`);
+  if (!IS_WIN && process.getuid && process.getuid() === 0 && process.env.SUDO_USER) {
+    log(`! Running under sudo: this sets up the agents of root (${HOME}), not of ${process.env.SUDO_USER}.`);
+    log('  Run it without sudo to set up your own agents.');
+  }
 
   if (!UNINSTALL) fetchApp();
 
