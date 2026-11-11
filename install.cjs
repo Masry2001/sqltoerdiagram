@@ -85,7 +85,7 @@ function backup(file) {
 }
 function readJson(file) {
   if (!exists(file)) return {};
-  const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
+  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
   if (!text.trim()) return {};
   return JSON.parse(text); // throws on JSONC; caller prints a manual snippet instead
 }
