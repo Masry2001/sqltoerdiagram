@@ -57,6 +57,8 @@ export class Diagram {
     this.edgeEndDrag = null;       // active end drag {id, end, tableKey, moved}
     this.edgePaths = {};           // line id -> straight path {points, fromSide, toSide}
     this._straightRun = 0;         // the latest straight routing; older results are dropped
+    this._live = null;             // background routing while tables are dragged
+    this._livePaths = null;        // its latest routes, for the dragged tables' lines
     this.highlightedRoutes = [];   // lines emphasised on the last draw
     this.pinned = null;            // clicked table (sticky focus)
     this.pinnedKeys = null;        // Set of focused table + neighbour keys
@@ -717,7 +719,8 @@ export class Diagram {
     // being moved, or it waits to be re-routed) is drawn as a simple right angle.
     const straightMode = this.isStraightMode();
     for (const seg of routes) {
-      let path = looseIds?.has(seg.id) ? null : this.edgePaths[seg.id];
+      // lines of a table being dragged use the routes found while dragging
+      let path = looseIds?.has(seg.id) ? (this._livePaths?.[seg.id] ?? null) : this.edgePaths[seg.id];
       if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
         if (!straightMode) continue;
         path = elbowPath(seg);
@@ -820,14 +823,69 @@ export class Diagram {
     return keys;
   }
 
+  // While tables are dragged in straight mode, route their lines around the
+  // other tables in a background worker, again and again: one routing at a
+  // time, the next one starts from wherever the tables are by then. Until a
+  // route matches the tables' current spot, the line is a simple right angle.
+  _scheduleLiveRoute() {
+    if (!this.isStraightMode()) return;
+    if (this._live?.busy) { this._live.pending = true; return; }
+    this._startLiveRoute();
+  }
+
+  _startLiveRoute() {
+    const keys = this._movingKeys();
+    if (!keys.size) return;
+    const { tables, edges } = this._straightInput();
+    const byKey = new Map(tables.map((t) => [t.key, t]));
+    const todo = [], keep = {};
+    for (const e of edges) {
+      if (keys.has(e.fromKey) || keys.has(e.toKey)) { todo.push(e); continue; }
+      const p = this.edgePaths[e.id];
+      if (p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey))) keep[e.id] = p;
+    }
+    if (!todo.length) return;
+    if (!this._live) {
+      this._live = { worker: new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' }), busy: false, pending: false };
+    }
+    const live = this._live;
+    live.busy = true;
+    live.pending = false;
+    live.worker.onmessage = (event) => {
+      live.busy = false;
+      if (this._live !== live) return;               // the drag ended
+      this._livePaths = event.data.paths;
+      this.markDirty();
+      if (live.pending) this._startLiveRoute();
+    };
+    live.worker.onerror = (err) => { live.busy = false; console.error('live routing failed', err); };
+    live.worker.postMessage({ tables, edges: todo, anchors: {}, keep, hidden: [...this.hidden] });
+  }
+
+  _stopLiveRoute() {
+    if (this._live) this._live.worker.terminate();
+    this._live = null;
+    this._livePaths = null;
+  }
+
   // After tables were moved: their lines choose their sides again. Straight
   // lines are re-routed; arranged curved lines are re-arranged.
-  _linesAfterMove(keys) {
+  _linesAfterMove(keys, livePaths = null) {
     if (!keys.size) return;
+    // routes found while dragging that match where the tables were dropped
+    // are kept on screen while the final routing runs, so nothing jumps
+    const settled = new Set();         // lines whose route from the drag already fits
+    if (livePaths && this.isStraightMode()) {
+      const byKey = this._tableMap();
+      for (const [id, p] of Object.entries(livePaths)) {
+        const [f, t] = id.split('>').map((s) => s.slice(0, s.lastIndexOf('.')));
+        if (pathStillFits(p, byKey.get(f), byKey.get(t))) { this.edgePaths[id] = p; settled.add(id); }
+      }
+    }
     // a moved table's lines start over: entry points and bends on them are
     // released, including ones placed by hand (drag an end again to fine-tune)
     for (const id of this._lineIdsOf(keys)) { delete this.edgeAnchors[id]; delete this.edgeBends[id]; }
-    if (this.isStraightMode()) this.rerouteStraight(keys);
+    if (this.isStraightMode()) this.rerouteStraight(keys, settled);
     else this._rearrangeLinesOf(keys);
   }
 
@@ -875,7 +933,7 @@ export class Diagram {
   // lines that need it (lines of moved tables, lines whose end left the table
   // edge or that a table now covers, and new lines), and keep every other line
   // exactly where it is.
-  async rerouteStraight(movedKeys = null) {
+  async rerouteStraight(movedKeys = null, settled = null) {
     if (!this.isStraightMode()) return null;
     const { tables, edges, anchors } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
@@ -884,7 +942,7 @@ export class Diagram {
     for (const e of edges) {
       if (this.hidden.has(e.fromKey) || this.hidden.has(e.toKey)) continue;
       const path = this.edgePaths[e.id];
-      const moved = movedKeys && (movedKeys.has(e.fromKey) || movedKeys.has(e.toKey));
+      const moved = movedKeys && (movedKeys.has(e.fromKey) || movedKeys.has(e.toKey)) && !settled?.has(e.id);
       const ok = path && !moved && pathStillFits(path, byKey.get(e.fromKey), byKey.get(e.toKey))
         && !pathUnderTables(path.points, visible.filter((t) => t.key !== e.fromKey && t.key !== e.toKey));
       if (ok) keep[e.id] = path;
@@ -921,12 +979,18 @@ export class Diagram {
       if (!first.failed.length) return { paths: first.paths, routed: todo };
       // a line found no free spot (a busy table's sides are taken by kept
       // lines): route every line of those tables again, together
+      // (only for lines of the moved tables: a line that never fit elsewhere
+      // shouldn't reshuffle its table on every move)
       const full = new Set();
-      for (const id of first.failed) { const e = todo.find((x) => x.id === id); if (e) { full.add(e.fromKey); full.add(e.toKey); } }
+      for (const id of first.failed) {
+        const e = todo.find((x) => x.id === id);
+        if (!e || (movedKeys && !movedKeys.has(e.fromKey) && !movedKeys.has(e.toKey))) continue;
+        full.add(e.fromKey); full.add(e.toKey);
+      }
       const keep2 = {}, todo2 = [...todo];
       for (const e of edges) {
         if (!keep[e.id]) continue;
-        if (full.has(e.fromKey) || full.has(e.toKey)) todo2.push(e);
+        if ((full.has(e.fromKey) || full.has(e.toKey)) && !settled?.has(e.id)) todo2.push(e);
         else keep2[e.id] = keep[e.id];
       }
       if (run !== this._straightRun || todo2.length === todo.length) return { paths: first.paths, routed: todo };
@@ -1578,6 +1642,7 @@ export class Diagram {
       for (const it of this.dragGroup.items) { it.t.x = it.sx0 + dx; it.t.y = it.sy0 + dy; }
       this.dragGroup.moved = true;
       this.markDirty();
+      this._scheduleLiveRoute();
       return true;
     }
     if (this.marquee) {
@@ -1607,6 +1672,7 @@ export class Diagram {
       }
       this.annoDrag.moved = true;
       this.markDirty();
+      if (this.annoDrag.tables.length) this._scheduleLiveRoute();
       return true;
     }
     if (this.drag) {
@@ -1615,6 +1681,7 @@ export class Diagram {
       this.drag.t.y = w.y - this.drag.dy;
       this.drag.moved = true;
       this.markDirty();
+      this._scheduleLiveRoute();
       return true;
     }
     if (this.pan) {
@@ -1629,6 +1696,8 @@ export class Diagram {
 
   _pointerUp() {
     const movedKeys = this._movingKeys();     // before the drag state is cleared
+    const livePaths = this._livePaths;
+    this._stopLiveRoute();
     if (this.edgeEndDrag) {
       const { moved, id, savedPath } = this.edgeEndDrag;
       this.edgeEndDrag = null;
@@ -1670,7 +1739,7 @@ export class Diagram {
       return;
     }
     if (this.dragGroup) {
-      if (this.dragGroup.moved) { this._linesAfterMove(movedKeys); this.onLayoutChange?.(); }
+      if (this.dragGroup.moved) { this._linesAfterMove(movedKeys, livePaths); this.onLayoutChange?.(); }
       this.dragGroup = null;
       return;
     }
@@ -1690,7 +1759,7 @@ export class Diagram {
     const changed = (this.drag && this.drag.moved) || (this.pan && this.pan.moved) ||
                     (this.annoDrag && this.annoDrag.moved) || (this.annoResize && this.annoResize.moved);
     // tables moved (one table, or a group dragged by its name): re-route lines
-    this._linesAfterMove(movedKeys);
+    this._linesAfterMove(movedKeys, livePaths);
     this.drag = null;
     this.pan = null;
     this.annoDrag = null;
