@@ -453,3 +453,82 @@ export function pathJumps(paths, minGap = 6) {
   }
   return jumps;
 }
+
+// Lines that would lie on top of each other (sharing part of a lane, or
+// leaving one entry point the same way) are drawn side by side instead: each
+// overlapping segment is moved a few units across its direction. Corners stay
+// right angles, because a horizontal segment only changes y and a vertical
+// one only changes x. paths: [{id, points}]. Returns {id: points} for the
+// lines that moved.
+export const SEPARATION = 4;
+export function separateOverlaps(paths, step = SEPARATION) {
+  // moving a line aside can put it on yet another line, so repeat until
+  // nothing overlaps (a few passes are enough in practice)
+  // merge straight runs first (a corner-free point would tilt when moved)
+  let current = paths.map((p) => ({ id: p.id, points: simplifyPath(p.points) })), moved = {};
+  for (let pass = 0; pass < 6; pass++) {
+    const next = separateOnce(current, step);
+    if (!Object.keys(next).length) break;
+    Object.assign(moved, next);
+    current = current.map((p) => (next[p.id] ? { id: p.id, points: next[p.id] } : p));
+  }
+  return moved;
+}
+
+function separateOnce(paths, step) {
+  const groups = new Map();   // "h|y" or "v|x" -> segments on that line
+  for (const { id, points } of paths) {
+    for (let i = 1; i < points.length; i++) {
+      const [x1, y1] = points[i - 1], [x2, y2] = points[i];
+      let key, lo, hi;
+      if (y1 === y2 && x1 !== x2) { key = 'h|' + y1; lo = Math.min(x1, x2); hi = Math.max(x1, x2); }
+      else if (x1 === x2 && y1 !== y2) { key = 'v|' + x1; lo = Math.min(y1, y2); hi = Math.max(y1, y2); }
+      else continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ id, i, lo, hi, color: 0 });
+    }
+  }
+  const offsetOf = (c) => (c % 2 ? 1 : -1) * Math.ceil(c / 2) * step;   // 0, +s, -s, +2s, -2s …
+  const moves = new Map();    // id -> [{i, axis, d}]
+  for (const [key, segs] of groups) {
+    if (segs.length < 2) continue;
+    segs.sort((a, b) => a.lo - b.lo || a.id.localeCompare(b.id) || a.i - b.i);
+    for (let k = 0; k < segs.length; k++) {
+      const s = segs[k];
+      const taken = new Set();
+      for (let j = 0; j < k; j++) {
+        const o = segs[j];
+        if (o.id !== s.id && Math.min(o.hi, s.hi) - Math.max(o.lo, s.lo) > 1) taken.add(o.color);
+      }
+      while (taken.has(s.color)) s.color++;
+      if (s.color) {
+        if (!moves.has(s.id)) moves.set(s.id, []);
+        moves.get(s.id).push({ i: s.i, axis: key[0] === 'h' ? 1 : 0, d: offsetOf(s.color) });
+      }
+    }
+  }
+  const out = {};
+  for (const { id, points } of paths) {
+    const m = moves.get(id);
+    if (!m) continue;
+    const pts = points.map((p) => [p[0], p[1]]);
+    for (const { i, axis, d } of m) { pts[i - 1][axis] += d; pts[i][axis] += d; }
+    out[id] = pts;
+  }
+  return out;
+}
+
+// Drops repeated points and points in the middle of a straight run.
+function simplifyPath(points) {
+  const out = [];
+  for (const p of points) {
+    const last = out[out.length - 1];
+    if (last && last[0] === p[0] && last[1] === p[1]) continue;
+    if (out.length >= 2) {
+      const a = out[out.length - 2];
+      if ((a[0] === last[0] && last[0] === p[0]) || (a[1] === last[1] && last[1] === p[1])) { out[out.length - 1] = p; continue; }
+    }
+    out.push(p);
+  }
+  return out;
+}

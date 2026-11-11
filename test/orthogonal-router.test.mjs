@@ -1,5 +1,5 @@
 // Tests for "Arrange lines straight". Run: node test/orthogonal-router.test.mjs
-import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits } from '../src/orthogonal-router.js';
+import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps } from '../src/orthogonal-router.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error('  ✗ ' + msg); } };
@@ -136,6 +136,28 @@ function throughTable(paths, map) {
   ok(pathStillFits(path, from, to), 'an untouched path still fits');
   const nudged = { ...from, x: -40 };
   ok(pathFits(path, nudged, to) && !pathStillFits(path, nudged, to), 'a path that now crosses its own moved table no longer fits');
+}
+
+// lines that would lie on top of each other are drawn side by side
+{
+  const shared = [
+    { id: 'a', points: [[0, 0], [100, 0], [100, 50]] },
+    { id: 'b', points: [[0, 0], [100, 0], [100, 80]] },
+    { id: 'c', points: [[0, 0], [60, 0], [60, -40]] },
+  ];
+  const apart = separateOverlaps(shared);
+  const drawn = shared.map((p) => ({ id: p.id, points: apart[p.id] || p.points }));
+  const starts = drawn.map((p) => p.points[0].join());
+  ok(new Set(starts).size === 3, 'three lines leaving one point get three entry points');
+  ok(!overlapping(Object.fromEntries(drawn.map((p) => [p.id, p]))), 'no two lines lie on top of each other');
+  ok(orthogonal(Object.fromEntries(drawn.map((p) => [p.id, p]))), 'moved lines keep right angles');
+  ok(!apart.a, 'the first line stays where it was');
+  const clean = [{ id: 'x', points: [[0, 0], [50, 0]] }, { id: 'y', points: [[0, 20], [50, 20]] }];
+  ok(Object.keys(separateOverlaps(clean)).length === 0, 'lines that do not overlap are left alone');
+  // a point in the middle of a straight run must not tilt the line when moved
+  const runs = [{ id: 'r', points: [[0, 0], [16, 0], [50, 0], [50, 40]] }, { id: 's', points: [[0, 0], [30, 0], [30, 40]] }];
+  const ra = separateOverlaps(runs);
+  ok(orthogonal(Object.fromEntries(runs.map((p) => [p.id, { points: ra[p.id] || p.points }]))), 'lines with extra points on a straight run stay right-angled');
 }
 
 console.log(`orthogonal router: ${pass} passed, ${fail} failed`);

@@ -7,7 +7,7 @@ import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
-import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables } from './orthogonal-router.js';
+import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
 const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
@@ -718,6 +718,7 @@ export class Diagram {
     // still fits its tables. In straight mode a line without one (its table is
     // being moved, or it waits to be re-routed) is drawn as a simple right angle.
     const straightMode = this.isStraightMode();
+    const chosen = [];
     for (const seg of routes) {
       // lines of a table being dragged use the routes found while dragging
       let path = looseIds?.has(seg.id) ? (this._livePaths?.[seg.id] ?? null) : this.edgePaths[seg.id];
@@ -725,10 +726,17 @@ export class Diagram {
         if (!straightMode) continue;
         path = elbowPath(seg);
       }
-      const first = path.points[0], last = path.points[path.points.length - 1];
-      const facing = { right: 1, bottom: 1, left: -1, top: -1 };
+      chosen.push({ seg, path });
+    }
+    // no two lines are drawn on top of each other or from one entry point
+    const apart = separateOverlaps(chosen.map(({ seg, path }) => ({ id: seg.id, points: path.points })));
+    const facing = { right: 1, bottom: 1, left: -1, top: -1 };
+    for (const { seg, path } of chosen) {
+      const points = apart[seg.id] || path.points;
+      const first = points[0], last = points[points.length - 1];
       Object.assign(seg, {
-        path: path.points,
+        path: points,
+        basePath: path.points,                       // the route before it was moved apart
         fx: first[0], fy: first[1], tx: last[0], ty: last[1],
         fromSide: path.fromSide, toSide: path.toSide,
         fromDir: facing[path.fromSide], toDir: facing[path.toSide],
@@ -938,20 +946,24 @@ export class Diagram {
     const { tables, edges, anchors } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
     const visible = tables.filter((t) => !this.hidden.has(t.key));
-    const keep = {}, todo = [];
-    for (const e of edges) {
-      if (this.hidden.has(e.fromKey) || this.hidden.has(e.toKey)) continue;
-      const path = this.edgePaths[e.id];
-      const moved = movedKeys && (movedKeys.has(e.fromKey) || movedKeys.has(e.toKey)) && !settled?.has(e.id);
-      const ok = path && !moved && pathStillFits(path, byKey.get(e.fromKey), byKey.get(e.toKey))
-        && !pathUnderTables(path.points, visible.filter((t) => t.key !== e.fromKey && t.key !== e.toKey));
-      if (ok) keep[e.id] = path;
-      else todo.push(e);
-    }
-    // an end the user placed by hand wins its spot: a kept line entering there
-    // is re-routed too
+    const shown = edges.filter((e) => !this.hidden.has(e.fromKey) && !this.hidden.has(e.toKey));
+    const fits = (e, p) => !!p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey));
+    const clear = (e, p) => !pathUnderTables(p.points, visible.filter((t) => t.key !== e.fromKey && t.key !== e.toKey));
+    const touches = (e) => !!movedKeys && (movedKeys.has(e.fromKey) || movedKeys.has(e.toKey));
+    settled = settled || new Set();
+
+    // 1) lines of the moved tables, routed exactly as while they were dragged
+    //    (same lines kept, same inputs), so letting go doesn't change them
+    const todo1 = shown.filter((e) => touches(e) && !settled.has(e.id));
+    const keep1 = {};
+    for (const e of shown) if (!todo1.includes(e) && fits(e, this.edgePaths[e.id])) keep1[e.id] = this.edgePaths[e.id];
+
+    // 2) then every other line that needs it, around those: lines whose end
+    //    left the table edge, that a table now covers, that are new, or that
+    //    lost the spot of an end the user placed by hand
     const handSpots = [];
-    for (const e of todo) {
+    for (const e of shown) {
+      if (fits(e, this.edgePaths[e.id]) && !touches(e)) continue;
       for (const end of ['from', 'to']) {
         const hand = anchors[e.id]?.[end];
         const t = byKey.get(end === 'from' ? e.fromKey : e.toKey);
@@ -961,41 +973,41 @@ export class Diagram {
         handSpots.push({ key: t.key, x, y });
       }
     }
-    if (handSpots.length) {
-      for (const e of edges) {
-        const path = keep[e.id];
-        if (!path) continue;
-        const ends = [[e.fromKey, path.points[0]], [e.toKey, path.points.at(-1)]];
-        if (ends.some(([k, [x, y]]) => handSpots.some((s) => s.key === k && Math.hypot(s.x - x, s.y - y) < 24))) {
-          delete keep[e.id];
-          todo.push(e);
-        }
-      }
-    }
-    if (!todo.length) return { routed: 0 };
+    const takesHandSpot = (e, p) => [[e.fromKey, p.points[0]], [e.toKey, p.points.at(-1)]]
+      .some(([k, [x, y]]) => handSpots.some((h) => h.key === k && Math.hypot(h.x - x, h.y - y) < 24));
+
     const run = ++this._straightRun;
     const route = async () => {
-      const first = await this._runStraightWorker({ tables, edges: todo, anchors, keep });
-      if (!first.failed.length) return { paths: first.paths, routed: todo };
-      // a line found no free spot (a busy table's sides are taken by kept
-      // lines): route every line of those tables again, together
-      // (only for lines of the moved tables: a line that never fit elsewhere
-      // shouldn't reshuffle its table on every move)
-      const full = new Set();
-      for (const id of first.failed) {
-        const e = todo.find((x) => x.id === id);
-        if (!e || (movedKeys && !movedKeys.has(e.fromKey) && !movedKeys.has(e.toKey))) continue;
-        full.add(e.fromKey); full.add(e.toKey);
+      const result = {};
+      let failed = [];
+      if (todo1.length) {
+        const r1 = await this._runStraightWorker({ tables, edges: todo1, anchors, keep: keep1 });
+        Object.assign(result, r1.paths);
+        failed = r1.failed;
       }
-      const keep2 = {}, todo2 = [...todo];
-      for (const e of edges) {
-        if (!keep[e.id]) continue;
-        if ((full.has(e.fromKey) || full.has(e.toKey)) && !settled?.has(e.id)) todo2.push(e);
-        else keep2[e.id] = keep[e.id];
+      if (run !== this._straightRun) return { paths: result, routed: todo1 };
+      // a moved table's line that found no free spot: the other lines of
+      // that busy table make room by being routed again together with it
+      const busy = new Set();
+      for (const id of failed) { const e = todo1.find((x) => x.id === id); if (e) { busy.add(e.fromKey); busy.add(e.toKey); } }
+      const todo2 = [], keep2 = {};
+      for (const e of shown) {
+        if (result[e.id]) { keep2[e.id] = result[e.id]; continue; }
+        const p = this.edgePaths[e.id];
+        const moved = touches(e);
+        const ok = fits(e, p) && (moved ? settled.has(e.id) : clear(e, p) && !takesHandSpot(e, p)
+          && !((busy.has(e.fromKey) || busy.has(e.toKey)) && p));
+        if (ok) keep2[e.id] = p;
+        else if (!moved || failed.includes(e.id)) todo2.push(e);
       }
-      if (run !== this._straightRun || todo2.length === todo.length) return { paths: first.paths, routed: todo };
-      const second = await this._runStraightWorker({ tables, edges: todo2, anchors, keep: keep2 });
-      return second.failed.length <= first.failed.length ? { paths: second.paths, routed: todo2 } : { paths: first.paths, routed: todo };
+      // a line that never fit anywhere stays as it is, instead of being tried
+      // (and reshuffling its neighbours) on every move
+      const retry = todo2.filter((e) => this.edgePaths[e.id] || touches(e) || !movedKeys);
+      if (retry.length) {
+        const r2 = await this._runStraightWorker({ tables, edges: retry, anchors, keep: keep2 });
+        Object.assign(result, r2.paths);
+      }
+      return { paths: result, routed: [...todo1, ...retry] };
     };
     const job = route().then(({ paths, routed }) => {
       // a newer move, an undo, or a switch back to curves happened meanwhile

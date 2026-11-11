@@ -3,7 +3,7 @@ import { THEMES, columnY, ROW_H, HEADER_H } from './renderer.js';
 import { NOTE_COLORS, groupColor } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
 import { routeEdges } from './edge-routing.js';
-import { pathStillFits, elbowPath, pathJumps, JUMP_RADIUS } from './orthogonal-router.js';
+import { pathStillFits, elbowPath, pathJumps, JUMP_RADIUS, separateOverlaps } from './orthogonal-router.js';
 
 // Crow's-foot cardinality marker at a line endpoint (world coords).
 //   dir = +1 if the line extends in +x from (x,y), else -1.
@@ -95,15 +95,22 @@ export function exportSVG(model, themeName, annotations = [], hidden = null, edg
   // straight mode a line without one is drawn as a simple right angle
   const facing = { right: 1, bottom: 1, left: -1, top: -1 };
   const straightMode = Object.keys(edgePaths || {}).length > 0;
+  const chosen = [];
   for (const seg of routed) {
     let path = edgePaths[seg.id];
     if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
       if (!straightMode) continue;
       path = elbowPath(seg);
     }
-    const first = path.points[0], last = path.points[path.points.length - 1];
+    chosen.push({ seg, path });
+  }
+  // lines that would lie on top of each other are drawn side by side
+  const apart = separateOverlaps(chosen.map(({ seg, path }) => ({ id: seg.id, points: path.points })));
+  for (const { seg, path } of chosen) {
+    const points = apart[seg.id] || path.points;
+    const first = points[0], last = points[points.length - 1];
     Object.assign(seg, {
-      path: path.points, fx: first[0], fy: first[1], tx: last[0], ty: last[1],
+      path: points, fx: first[0], fy: first[1], tx: last[0], ty: last[1],
       fromDir: facing[path.fromSide], toDir: facing[path.toSide],
       fromVertical: path.fromSide === 'top' || path.fromSide === 'bottom',
       toVertical: path.toSide === 'top' || path.toSide === 'bottom',
