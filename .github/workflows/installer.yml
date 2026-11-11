@@ -46,8 +46,12 @@ jobs:
           SQL_TO_ERD_REPO: https://github.com/${{ env.HEAD_REPO }}.git
           SQL_TO_ERD_REF: ${{ env.HEAD_REF }}
         run: |
+          # Run from inside the checkout on purpose: a piped install must still
+          # clone to ~/.sql-to-erd, not pick up the current folder.
           curl -fsSL "https://raw.githubusercontent.com/$HEAD_REPO/$HEAD_SHA/install.cjs" | node - --no-cli
-          node .github/scripts/check-install.cjs installed
+          test -f ~/.sql-to-erd/mcp/server.mjs
+          EXPECT_APP_DIR="$(node -p 'require("path").join(require("os").homedir(), ".sql-to-erd")')" \
+            node .github/scripts/check-install.cjs installed
 
       - name: Re-run changes nothing
         env:

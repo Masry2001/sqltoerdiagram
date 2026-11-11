@@ -43,6 +43,10 @@ if (want) {
   const entry = cursor.mcpServers[NAME];
   expect(path.isAbsolute(entry.command) && fs.existsSync(entry.command), `node path is absolute and exists: ${entry.command}`);
   expect(fs.existsSync(entry.args[0]), `server path exists: ${entry.args[0]}`);
+  if (process.env.EXPECT_APP_DIR) {
+    const wanted = path.join(path.resolve(process.env.EXPECT_APP_DIR), 'mcp', 'server.mjs');
+    expect(entry.args[0] === wanted, `server is in the app folder ${wanted}`);
+  }
 }
 
 if (failures.length) {

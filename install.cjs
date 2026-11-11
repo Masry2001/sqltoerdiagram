@@ -55,8 +55,12 @@ const did = (msg) => console.log(`  ${DRY ? '[dry-run] ' : ''}${msg}`);
 function appDir() {
   if (opt('dir')) return path.resolve(opt('dir'));
   if (process.env.SQL_TO_ERD_HOME) return path.resolve(process.env.SQL_TO_ERD_HOME);
-  const here = path.resolve(path.dirname(__filename));
-  if (fs.existsSync(path.join(here, 'mcp', 'server.mjs'))) return here;
+  // Piped in, __filename is "[stdin]": its dirname would be the current folder,
+  // so only trust it when the script really is a file on disk.
+  if (fs.existsSync(__filename)) {
+    const here = path.dirname(path.resolve(__filename));
+    if (fs.existsSync(path.join(here, 'mcp', 'server.mjs'))) return here;
+  }
   return path.join(HOME, '.sql-to-erd');
 }
 const APP = appDir();
