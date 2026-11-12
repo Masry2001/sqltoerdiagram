@@ -6,8 +6,14 @@ statements) → get a clean, interactive entity-relationship diagram.
 ![deps](https://img.shields.io/badge/deps-2-blue) ![bundle](https://img.shields.io/badge/bundle-32KB%20gzip-brightgreen) [![Installer](https://github.com/Masry2001/sqltoerdiagram/actions/workflows/installer.yml/badge.svg)](https://github.com/Masry2001/sqltoerdiagram/actions/workflows/installer.yml)
 
 **100% local · no signup · no upload.** It runs entirely in your browser, so your
-schema never leaves your machine — no server, no backend. Live at
-**[sqltoerdiagram.com](https://sqltoerdiagram.com)**.
+schema never leaves your machine — no server, no backend.
+
+> Built on **[royalbhati/sqltoerdiagram](https://github.com/royalbhati/sqltoerdiagram)**
+> by Royal Bhati, whose original is live at [sqltoerdiagram.com](https://sqltoerdiagram.com).
+> This version adds right-angle line routing, lines you can shape by hand, groups,
+> several diagrams, undo, search and an MCP server for AI agents (see
+> [What this version adds](#what-this-version-adds)). Run it with the
+> [quick start](#quick-start-with-an-ai-agent) or [locally](#run-locally).
 
 ## Quick start with an AI agent
 
@@ -28,7 +34,7 @@ curl.exe -fsSL https://raw.githubusercontent.com/Masry2001/sqltoerdiagram/main/i
 Then restart your agent and ask it: *"Draw an ER diagram from schema.sql"*.
 Details are in [MCP](#mcp) below.
 
-## What this fork adds
+## What this version adds
 
 - **Arrange ▾ → Arrange lines straight**: every relation becomes a right-angle line
   that goes around tables, each line enters its table at its own point, lines keep
@@ -320,6 +326,16 @@ Select **BigQuery** from the dialect dropdown to work with BigQuery SQL instead 
 | **Delete** | Remove the pinned manual link |
 | **Double-click** canvas | Zoom in |
 | Drag the pane divider | Resize the editor |
+
+## Credits
+
+- **[Royal Bhati](https://github.com/royalbhati)**: the original SQL to ER Diagram
+  (parser, canvas, layout, sharing, export), which this project builds on.
+- **Timothy Carruthers**: the BigQuery dialect, contributed to the original.
+- **[Mohamed Hany Musa](https://github.com/Masry2001)**: line routing, editable and
+  hand-shaped lines, groups, My diagrams, search, undo and the MCP server.
+- **[Kirlos Osama](https://github.com/ker00sama-dev)**: the one-command installer
+  for AI agents, the AI skill and the CI test of the installer.
 
 ## License
 
