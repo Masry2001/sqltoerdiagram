@@ -2024,12 +2024,52 @@ export class Diagram {
   selectionLines() {
     const keys = new Set([...this.selected].map(t => t.key));
     if (!keys.size) return null;
-    let relations = 0, dashed = 0;
-    for (const r of this.model.relations || []) {
-      if (keys.has(r.fromTable.toLowerCase()) || keys.has(r.toTable.toLowerCase())) relations++;
-    }
-    for (const l of this.manualLinks) if (keys.has(l.from.table) || keys.has(l.to.table)) dashed++;
-    return { names: [...this.selected].map(t => t.name), relations, dashed };
+    // each line: the table at its other end, and the column that links it
+    // (the other table's column, or the selected table's own for a line that
+    // leaves it: out)
+    const names = new Map(this.model.tables.map(t => [t.key, t.name]));
+    const lines = [];
+    const add = (dashed, fromKey, fromCol, toKey, toCol) => {
+      if (!keys.has(fromKey) && !keys.has(toKey)) return;
+      const out = keys.has(fromKey) && fromKey !== toKey;     // leaves a selected table
+      const other = out ? toKey : fromKey;
+      lines.push({
+        id: `${fromKey}.${fromCol}>${toKey}.${toCol}`, fromKey, toKey,
+        dashed, other, otherName: names.get(other) || other, out, column: fromCol,
+        text: `${names.get(fromKey) || fromKey}.${fromCol} → ${names.get(toKey) || toKey}.${toCol}`,
+      });
+    };
+    for (const r of this.model.relations || []) add(false, r.fromTable.toLowerCase(), r.fromCols[0], r.toTable.toLowerCase(), r.toCols[0]);
+    for (const l of this.manualLinks) add(true, l.from.table, l.from.col, l.to.table, l.to.col);
+    return {
+      names: [...this.selected].map(t => t.name),
+      relations: lines.filter(l => !l.dashed).length,
+      dashed: lines.filter(l => l.dashed).length,
+      lines,
+    };
+  }
+
+  // Shows one line on its own: only it and its two tables stay bright (as when
+  // the line is clicked), and the view moves so both tables are in sight. It
+  // zooms out when they don't fit, never in.
+  focusLine(id, fromKey, toKey) {
+    const ends = [fromKey, toKey].map(k => this.model.tables.find(t => t.key === k));
+    if (ends.some(t => !t || !Number.isFinite(t.x))) return;
+    for (const t of ends) if (this.hidden.has(t.key)) this.setTableHidden(t.key, false);
+    this.pinned = null;
+    this.pinnedKeys = null;
+    this.pinnedEdge = { id, fromKey, toKey };
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const take = (x, y) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
+    for (const t of ends) { take(t.x, t.y); take(t.x + t.w, t.y + t.h); }
+    for (const [x, y] of this.edgePaths[id]?.points || []) take(x, y);
+    const pad = 60;
+    const scale = clamp(Math.min(this.cam.scale, (this.viewW - pad * 2) / (x1 - x0), (this.viewH - pad * 2) / (y1 - y0)), 0.08, 1.5);
+    this.cam.scale = scale;
+    this.cam.x = this.viewW / 2 - ((x0 + x1) / 2) * scale;
+    this.cam.y = this.viewH / 2 - ((y0 + y1) / 2) * scale;
+    this.markDirty();
+    this.onZoom?.(scale);
   }
 
   isSelected(key) {

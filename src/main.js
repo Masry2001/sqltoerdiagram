@@ -346,19 +346,64 @@ const _prevHiddenChange = diagram.onHiddenChange;
 diagram.onHiddenChange = () => { if (_prevHiddenChange) _prevHiddenChange(); renderTables(); };
 diagram.onSelectionChange = () => { renderTables(); renderSelectionInfo(); };
 
-// Next to the diagram name: how many lines the selected table has
-const selInfo = $('sel-info');
+// Next to the diagram name: how many lines the selected table has; a click
+// lists the tables at their other ends
+const selWrap = $('sel-wrap'), selInfo = $('sel-info'), selMenu = $('sel-menu');
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 function renderSelectionInfo() {
   const info = diagram.selectionLines();
-  selInfo.hidden = !info;
-  if (!info) return;
-  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  selWrap.hidden = !info;
+  if (!info) { selMenu.hidden = true; return; }
   const who = info.names.length === 1 ? info.names[0] : plural(info.names.length, 'table');
   selInfo.replaceChildren(
     Object.assign(document.createElement('b'), { textContent: who }),
-    ` · ${plural(info.relations, 'relation')} · ${info.dashed} dashed`,
+    ` · ${plural(info.relations, 'relation')} · ${info.dashed} dashed ▾`,
   );
+  if (!selMenu.hidden) renderSelectionMenu(info);
 }
+// one row per line: the table at its other end and the column that links
+// them; a click shows that line alone, with its two tables
+function renderSelectionMenu(info = diagram.selectionLines()) {
+  selMenu.replaceChildren();
+  if (!info) return;
+  for (const dashed of [false, true]) {
+    const lines = info.lines.filter((l) => l.dashed === dashed)
+      .sort((a, b) => a.otherName.localeCompare(b.otherName) || a.column.localeCompare(b.column));
+    const tables = new Set(lines.map((l) => l.other)).size;
+    const label = document.createElement('div');
+    label.className = 'menu-label';
+    label.textContent = `${dashed ? 'Dashed' : 'Relations'} · ${plural(tables, 'table')} · ${plural(lines.length, 'line')}`;
+    selMenu.appendChild(label);
+    if (!lines.length) {
+      const none = document.createElement('div');
+      none.className = 'sel-none';
+      none.textContent = 'None';
+      selMenu.appendChild(none);
+      continue;
+    }
+    const list = document.createElement('div');
+    list.className = 'sel-list';
+    for (const l of lines) {
+      const row = document.createElement('button');
+      row.className = 'sel-row';
+      row.title = l.text + '\nClick to show this line';
+      const nm = document.createElement('span'); nm.className = 'sel-row-name'; nm.textContent = l.otherName;
+      const col = document.createElement('span'); col.className = 'sel-row-cols';
+      col.textContent = (l.out ? 'via ' : '') + l.column;
+      row.append(nm, col);
+      row.addEventListener('click', () => { selMenu.hidden = true; diagram.focusLine(l.id, l.fromKey, l.toKey); });
+      list.appendChild(row);
+    }
+    selMenu.appendChild(list);
+  }
+}
+selInfo.addEventListener('click', (e) => {
+  e.stopPropagation();
+  selMenu.hidden = !selMenu.hidden;
+  if (!selMenu.hidden) renderSelectionMenu();
+});
+selMenu.addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => { selMenu.hidden = true; });
 // links drawn, removed or inferred, and SQL edits, change the counts too
 const _prevLayoutChange = diagram.onLayoutChange;
 diagram.onLayoutChange = (...args) => { _prevLayoutChange?.(...args); renderSelectionInfo(); };
