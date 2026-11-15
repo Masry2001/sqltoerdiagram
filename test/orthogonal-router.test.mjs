@@ -1,5 +1,5 @@
 // Tests for "Arrange lines straight". Run: node test/orthogonal-router.test.mjs
-import { routeStraight, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps, moveSegment, nearestSegment, followMove, sideFacesAway } from '../src/orthogonal-router.js';
+import { routeStraight, routeStraightTidy, arrivalOrder, countCrossings, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps, moveSegment, nearestSegment, followMove, sideFacesAway } from '../src/orthogonal-router.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error('  ✗ ' + msg); } };
@@ -212,6 +212,47 @@ function throughTable(paths, map) {
   ok(sideFacesAway(table('a', 600, 0), 'right', table('b', 0, 0)), 'a right side looks away from a table on the left');
   ok(!sideFacesAway(table('a', 0, 0), 'right', table('b', 600, 0)), 'a right side looks toward a table on the right');
   ok(!sideFacesAway(table('a', 0, 0), 'bottom', table('b', 600, 0)), 'a bottom side next to a table beside it is fine');
+}
+
+// fewer crossings: lines reaching one side of a busy table, from near and far
+{
+  const hub = table('hub', 0, 0, 240, 640);
+  const near = table('near', 400, -200);
+  const far = [0, 1, 2, 3, 4].map((i) => table('far' + i, 700 + i * 260, -1400 - i * 120));
+  const map = byKey(hub, near, ...far);
+  const edges = [near, ...far].map((t) => edge(t.key, 'hub'));
+  const plain = routeStraight(edges, map, { crossCost: 3 });
+  const tidy = routeStraightTidy(edges, map, { passes: 1 });
+  const all = (r) => Object.values(r.paths);
+  ok(Object.keys(tidy.paths).length === edges.length && !tidy.failed.length, 'tidy routing routes every line');
+  ok(orthogonal(tidy.paths) && !overlapping(tidy.paths) && !throughTable(tidy.paths, map), 'tidy lines are square, apart and clear of tables');
+  ok(countCrossings(all(tidy)) < countCrossings(all(plain)), `ordering ends by how lines arrive crosses less (${countCrossings(all(tidy))} vs ${countCrossings(all(plain))})`);
+}
+
+// where an end belongs on its side, from the way its line leaves
+{
+  // three lines leave a right side at x=200: two turn up (at 260 and 400), one
+  // goes straight, one turns down
+  const hint = arrivalOrder({
+    a: { points: [[200, 50], [400, 50], [400, -300]], fromSide: 'right', toSide: 'left' },
+    b: { points: [[200, 60], [260, 60], [260, -300]], fromSide: 'right', toSide: 'left' },
+    c: { points: [[200, 70], [900, 70]], fromSide: 'right', toSide: 'left' },
+    d: { points: [[200, 80], [300, 80], [300, 600]], fromSide: 'right', toSide: 'left' },
+  });
+  const order = ['a', 'b', 'c', 'd'].sort((p, q) => {
+    const hp = hint[p + '|from|right'], hq = hint[q + '|from|right'];
+    return hp[0] - hq[0] || hp[1] - hq[1];
+  });
+  ok(order.join('') === 'bacd', 'turning up nearest the table goes highest, turning down goes lowest');
+  ok(hint['a|to|left'] && hint['c|to|left'][0] === 1, 'the far end gets a place too');
+}
+
+// counting crossings
+{
+  const plus = [{ points: [[0, 50], [100, 50]] }, { points: [[50, 0], [50, 100]] }];
+  ok(countCrossings(plus) === 1, 'a horizontal and a vertical line crossing count once');
+  ok(countCrossings([{ points: [[0, 0], [100, 0]] }, { points: [[100, 0], [100, 100]] }]) === 0, 'lines that only meet at an end do not cross');
+  ok(countCrossings([{ points: [[0, 50], [100, 50], [100, 0], [20, 0], [20, 100]] }]) === 0, 'a line never crosses itself');
 }
 
 console.log(`orthogonal router: ${pass} passed, ${fail} failed`);

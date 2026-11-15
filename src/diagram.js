@@ -7,7 +7,7 @@ import { relationCardinality } from './cardinality.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
-import { pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved, moveSegment, nearestSegment, followMove, sideFacesAway } from './orthogonal-router.js';
+import { countCrossings, pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved, moveSegment, nearestSegment, followMove, sideFacesAway } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
 const GROUP_LABEL_FONT = `600 13px ${GROUP_LABEL_FAMILY}`;
@@ -826,7 +826,7 @@ export class Diagram {
     }
     const run = ++this._straightRun;
     const todo = edges.filter((e) => !keep[e.id]);
-    const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges: todo, anchors, keep });
+    const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges: todo, anchors, keep, tidy: true });
     if (run === this._straightRun) {
       this.edgePaths = { ...keep, ...paths };
       // entry points and bends from the curved "Arrange lines" don't apply to
@@ -839,7 +839,7 @@ export class Diagram {
       this.markDirty();
       this.onLayoutChange?.();
     }
-    return { routed: Object.keys(paths).length, failed: failed.length, sharing: overlapping.length, ms };
+    return { routed: Object.keys(paths).length, failed: failed.length, sharing: overlapping.length, crossings: countCrossings(Object.values({ ...keep, ...paths })), ms };
   }
 
   // Keys of the tables being dragged right now (one table, a selection, or a
@@ -1110,10 +1110,43 @@ export class Diagram {
       if (this.onLinesRerouted) this.onLinesRerouted();
       else this.onLayoutChange?.();
       return { routed: Object.keys(paths).length };
+    }).then(async (done) => {
+      if (done && movedKeys) await this._tidyLinesOf(movedKeys, run);
+      return done;
     }).catch((err) => { console.error('re-routing straight lines failed', err); return null; });
     this.rerouting = job;                    // lets callers (and tests) wait for it
     job.finally(() => { if (this.rerouting === job) this.rerouting = null; });
     return job;
+  }
+
+  // After a move settles: the moved tables' lines were routed the quick way
+  // (so they could follow the drag). Route them again the careful way, as
+  // "Arrange lines straight" does: their ends ordered by how each line
+  // arrives, and crossings avoided. Lines shaped by hand stay. The result is
+  // used only when it crosses no more than what is on screen.
+  async _tidyLinesOf(keys, run) {
+    if (run !== this._straightRun || !this.isStraightMode()) return;
+    const { tables, edges, anchors } = this._straightInput();
+    const byKey = new Map(tables.map((t) => [t.key, t]));
+    const todo = [], keep = {};
+    for (const e of edges) {
+      if (this.hidden.has(e.fromKey) || this.hidden.has(e.toKey)) continue;
+      const p = this.edgePaths[e.id];
+      const fits = !!p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey));
+      if ((keys.has(e.fromKey) || keys.has(e.toKey)) && !p?.hand) todo.push(e);
+      else if (fits) keep[e.id] = p;
+    }
+    if (!todo.length) return;
+    // a line that finds no route keeps the one it has
+    const { paths } = await this._runStraightWorker({ tables, edges: todo, anchors, keep, tidy: true, passes: 0 });
+    if (run !== this._straightRun || !this.isStraightMode()) return;     // moved again meanwhile
+    const before = Object.values(this.edgePaths);
+    const after = { ...this.edgePaths, ...paths };
+    if (countCrossings(Object.values(after)) > countCrossings(before)) return;
+    this.edgePaths = after;
+    this.markDirty();
+    if (this.onLinesRerouted) this.onLinesRerouted();
+    else this.onLayoutChange?.();
   }
 
   clearEdgePaths() {
