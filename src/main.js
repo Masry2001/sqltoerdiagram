@@ -390,6 +390,19 @@ function renderSelectionMenu(info = diagram.selectionLines()) {
     selMenu.appendChild(list);
   }
 }
+// Next to the diagram name: the highlighted line and the two tables it joins
+const lineInfo = $('line-info');
+function renderLineInfo() {
+  const line = diagram.pinnedLine();
+  lineInfo.hidden = !line;
+  if (!line) return;
+  const end = (table, col) => [Object.assign(document.createElement('b'), { textContent: table }), '.' + col];
+  const kind = Object.assign(document.createElement('span'), { className: 'line-kind', textContent: line.dashed ? 'dashed' : 'relation' });
+  lineInfo.replaceChildren(...end(line.from, line.fromCol), ' → ', ...end(line.to, line.toCol), kind);
+  lineInfo.title = `${line.from}.${line.fromCol} → ${line.to}.${line.toCol}` + (line.dashed ? ' (dashed: drawn by hand or inferred)' : ' (foreign key)');
+}
+diagram.onPinnedEdgeChange = renderLineInfo;
+
 selInfo.addEventListener('click', (e) => {
   e.stopPropagation();
   selMenu.hidden = !selMenu.hidden;

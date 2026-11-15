@@ -51,7 +51,8 @@ export class Diagram {
     this.pan = null;               // active background pan
     this.hover = null;             // table under cursor (transient highlight)
     this.hoverEdge = null;         // id of the line under the cursor
-    this.pinnedEdge = null;        // clicked line {id, fromKey, toKey} (sticky focus)
+    this._pinnedEdge = null;       // clicked line {id, fromKey, toKey} (sticky focus), see pinnedEdge
+    this.onPinnedEdgeChange = null; // fired when a line is clicked, released or shown from a list
     this.pressEdge = null;         // line under an in-progress click
     this.edgeBends = {};           // line id -> {x, y} offset of its midpoint
     this.edgeDrag = null;          // active bend {id, baseX, baseY, grabX, grabY, moved}
@@ -108,6 +109,28 @@ export class Diagram {
     this.searchMark = null;
     this.markDirty();
     if (!keepCamera) {/* caller may fit */}
+  }
+
+  // The clicked line. Set in many places (a click, a table click, a new
+  // diagram, a removed link…); every change that picks another line, or none,
+  // is reported through onPinnedEdgeChange.
+  get pinnedEdge() { return this._pinnedEdge; }
+  set pinnedEdge(edge) {
+    const changed = (this._pinnedEdge?.id ?? null) !== (edge?.id ?? null);
+    this._pinnedEdge = edge;
+    if (changed) this.onPinnedEdgeChange?.();
+  }
+
+  // The clicked line, described: its two tables and columns, and whether it
+  // is a dashed link (drawn by hand or inferred). Null when no line is clicked.
+  pinnedLine() {
+    const edge = this.pinnedEdge;
+    if (!edge) return null;
+    const [from, to] = edge.id.split('>');
+    const fromCol = from.slice(from.lastIndexOf('.') + 1), toCol = to.slice(to.lastIndexOf('.') + 1);
+    const name = (key) => this.model.tables.find(t => t.key === key)?.name || key;
+    const dashed = this.manualLinks.some(l => `${l.from.table}.${l.from.col}>${l.to.table}.${l.to.col}` === edge.id);
+    return { from: name(edge.fromKey), fromCol, to: name(edge.toKey), toCol, dashed };
   }
 
   // The table whose relationships should be emphasised: a click-pinned table
