@@ -241,14 +241,7 @@ canvas.addEventListener('contextmenu', (e) => {
     if (link) items.push({ label: 'Remove link', act: () => diagram.removeManualLink(link) });
   }
   if (diagram.hiddenCount() > 0) items.push({ label: `Show all hidden (${diagram.hiddenCount()})`, act: () => diagram.showAllHidden() });
-  if (diagram.manualLinkCount() > 0) {
-    items.push({
-      label: `Clear all manual links (${diagram.manualLinkCount()})`,
-      act: () => {
-        if (window.confirm(`Remove all ${diagram.manualLinkCount()} manual links? This can't be undone.`)) diagram.clearManualLinks();
-      },
-    });
-  }
+  // (no "clear all manual links" here: one slip removed every dashed link)
   if (!items.length) { hideCtx(); return; }
   ctxMenu.innerHTML = '';
   for (const it of items) {
