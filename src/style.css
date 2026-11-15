@@ -318,6 +318,14 @@ a.btn { text-decoration: none; color: var(--text); }
   background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 6px 9px; outline: none;
 }
 .doc-rename[hidden], .doc-btn[hidden] { display: none; }
+/* the selected table's line counts, next to the diagram name */
+.sel-info {
+  margin-left: 4px; padding: 4px 9px; border-radius: 999px;
+  font-size: 12px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 360px;
+}
+.sel-info b { color: var(--text); font-weight: 600; }
+.sel-info[hidden] { display: none; }
 .doc-menu { min-width: 280px; }
 .doc-list { max-height: 300px; overflow-y: auto; }
 .doc-row { display: flex; align-items: center; gap: 2px; border-radius: 7px; }

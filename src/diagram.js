@@ -2018,6 +2018,20 @@ export class Diagram {
     this.onSelectionChange?.();
   }
 
+  // The lines of the selected tables: relations (foreign keys) and dashed
+  // links (drawn by hand or inferred). A line between two selected tables, or
+  // from a table to itself, counts once. Null when nothing is selected.
+  selectionLines() {
+    const keys = new Set([...this.selected].map(t => t.key));
+    if (!keys.size) return null;
+    let relations = 0, dashed = 0;
+    for (const r of this.model.relations || []) {
+      if (keys.has(r.fromTable.toLowerCase()) || keys.has(r.toTable.toLowerCase())) relations++;
+    }
+    for (const l of this.manualLinks) if (keys.has(l.from.table) || keys.has(l.to.table)) dashed++;
+    return { names: [...this.selected].map(t => t.name), relations, dashed };
+  }
+
   isSelected(key) {
     for (const t of this.selected) if (t.key === key) return true;
     return false;

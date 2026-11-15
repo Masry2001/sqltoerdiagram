@@ -344,7 +344,24 @@ tpHideAll.addEventListener('click', () => diagram.setTablesHidden(filteredTables
 tpShowAll.addEventListener('click', () => diagram.setTablesHidden(filteredTables().map((t) => t.key), false));
 const _prevHiddenChange = diagram.onHiddenChange;
 diagram.onHiddenChange = () => { if (_prevHiddenChange) _prevHiddenChange(); renderTables(); };
-diagram.onSelectionChange = renderTables;
+diagram.onSelectionChange = () => { renderTables(); renderSelectionInfo(); };
+
+// Next to the diagram name: how many lines the selected table has
+const selInfo = $('sel-info');
+function renderSelectionInfo() {
+  const info = diagram.selectionLines();
+  selInfo.hidden = !info;
+  if (!info) return;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const who = info.names.length === 1 ? info.names[0] : plural(info.names.length, 'table');
+  selInfo.replaceChildren(
+    Object.assign(document.createElement('b'), { textContent: who }),
+    ` · ${plural(info.relations, 'relation')} · ${info.dashed} dashed`,
+  );
+}
+// links drawn, removed or inferred, and SQL edits, change the counts too
+const _prevLayoutChange = diagram.onLayoutChange;
+diagram.onLayoutChange = (...args) => { _prevLayoutChange?.(...args); renderSelectionInfo(); };
 
 let lastModel = null;
 let firstRender = true;
