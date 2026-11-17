@@ -838,7 +838,9 @@ export class Diagram {
 
   // Arrange lines straight: route every line as horizontal and vertical
   // segments around the tables (in a background worker), then show them.
-  async arrangeLinesStraight() {
+  // `auto`: done by the app on its own (straight is the default line style), so
+  // the result joins the previous undo step instead of making its own.
+  async arrangeLinesStraight({ auto = false } = {}) {
     const { tables, edges, anchors } = this._straightInput();
     // lines the user shaped by hand stay, while they still fit their tables
     const byKey = new Map(tables.map((t) => [t.key, t]));
@@ -860,7 +862,8 @@ export class Diagram {
       this.edgeBends = Object.fromEntries(Object.entries(this.edgeBends).filter(([, b]) => !b.arranged));
       this.pinnedEdge = null;
       this.markDirty();
-      this.onLayoutChange?.();
+      if (auto && this.onLinesRerouted) this.onLinesRerouted();
+      else this.onLayoutChange?.();
     }
     return { routed: Object.keys(paths).length, failed: failed.length, sharing: overlapping.length, crossings: countCrossings(Object.values({ ...keep, ...paths })), ms };
   }

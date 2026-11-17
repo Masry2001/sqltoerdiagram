@@ -417,6 +417,27 @@ diagram.onLayoutChange = (...args) => { _prevLayoutChange?.(...args); renderSele
 let lastModel = null;
 let firstRender = true;
 
+// Line style, remembered in this browser: straight (the default) or curved.
+// Choosing "Arrange lines straight" or "Arrange lines" in the Arrange menu sets
+// it. While it is straight, a diagram that has no straight lines yet (a new or
+// loaded diagram, or one whose tables were just arranged) gets them on its own.
+let lineStyle = localStorage.getItem('dbdiga-lines') === 'curved' ? 'curved' : 'straight';
+function setLineStyle(style) {
+  lineStyle = style;
+  localStorage.setItem('dbdiga-lines', style);
+}
+let autoStraightTimer = null;
+function straightenByDefault({ force = false } = {}) {
+  if (lineStyle !== 'straight' || applyingHistory) return;
+  clearTimeout(autoStraightTimer);
+  autoStraightTimer = setTimeout(() => {
+    autoStraightTimer = null;
+    const lines = diagram.model.relations.length + diagram.manualLinks.length;
+    if (!lines || (!force && diagram.isStraightMode())) return;
+    straightenLines({ auto: true });
+  }, 150);
+}
+
 // layout options (persisted)
 const layoutOpts = {
   dir: localStorage.getItem('dbdiga-dir') || 'LR',
@@ -480,10 +501,13 @@ function rebuild({ arrange = false, restore = null } = {}) {
 
   diagram.markDirty();
   lastModel = result;
+  const placedFresh = arrange || (!restore && firstRender);
   firstRender = false;
   saveLayoutDebounced();
   renderTables();
   if (visualEditor) visualEditor.render();
+  // tables placed from scratch: their old straight lines no longer fit
+  straightenByDefault({ force: placedFresh });
 }
 
 function updateStatus(result, sql) {
@@ -590,8 +614,21 @@ function syncMenu() {
     el.classList.toggle('active', el.dataset.dir === layoutOpts.dir);
   for (const el of arrangeMenu.querySelectorAll('[data-spacing]'))
     el.classList.toggle('active', el.dataset.spacing === layoutOpts.spacing);
+  arrangeMenu.querySelector('[data-act="arrange-lines-straight"]').classList.toggle('active', lineStyle === 'straight');
+  arrangeMenu.querySelector('[data-act="arrange-lines"]').classList.toggle('active', lineStyle === 'curved');
 }
 syncMenu();
+
+// Runs "Arrange lines straight", showing progress on the Arrange button.
+function straightenLines({ auto = false } = {}) {
+  const button = $('btn-arrange');
+  button.textContent = 'Arranging lines…';
+  button.disabled = true;
+  canvas.style.cursor = 'progress';
+  return diagram.arrangeLinesStraight({ auto })     // runs in a worker; Ctrl+Z undoes it
+    .catch((err) => console.error(err))
+    .finally(() => { button.textContent = 'Arrange'; button.disabled = false; canvas.style.cursor = ''; });
+}
 
 // The button only opens and closes the menu. Direction and spacing are settings;
 // tables move only when "Arrange tables" is chosen.
@@ -615,17 +652,13 @@ arrangeMenu.addEventListener('click', (e) => {
   if (item.dataset.act === 'arrange') { arrangeTables(); return; }
   if (item.dataset.act === 'arrange-lines-straight') {
     arrangeMenu.hidden = true;
-    const button = $('btn-arrange');
-    button.textContent = 'Arranging lines…';
-    button.disabled = true;
-    canvas.style.cursor = 'progress';
-    diagram.arrangeLinesStraight()                 // runs in a worker; Ctrl+Z undoes it
-      .catch((err) => console.error(err))
-      .finally(() => { button.textContent = 'Arrange'; button.disabled = false; canvas.style.cursor = ''; });
+    setLineStyle('straight');
+    straightenLines();
     return;
   }
   if (item.dataset.act === 'arrange-lines') {
     arrangeMenu.hidden = true;
+    setLineStyle('curved');
     diagram.arrangeAllLines();                     // keeps hand-placed lines; Ctrl+Z undoes it
     return;
   }
