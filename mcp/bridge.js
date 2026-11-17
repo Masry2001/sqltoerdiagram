@@ -181,19 +181,31 @@ function lineStats() {
   let overOtherGroups = 0;
   let betweenGroups = 0;
   const lines = lineList();
+  const segments = [];
   for (const [a, b] of lines) {
     const ta = known.get(a);
     const tb = known.get(b);
     if (!ta || !tb || !Number.isFinite(ta.x) || !Number.isFinite(tb.x)) continue;
     const [ax, ay] = center(ta);
     const [bx, by] = center(tb);
+    segments.push({ a, b, p: [ax, ay], q: [bx, by] });
     length += Math.hypot(bx - ax, by - ay);
     const fa = frameOf(ta);
     const fb = frameOf(tb);
     if (fa !== fb) betweenGroups++;
     if (frames.some((f) => f !== fa && f !== fb && segmentHitsRect(ax, ay, bx, by, f))) overOtherGroups++;
   }
-  return { lines: lines.length, between_groups: betweenGroups, total_length: Math.round(length), lines_over_other_groups: overOtherGroups };
+  // centre-to-centre lines that cross (lines sharing a table don't count)
+  const turn = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
+  let crossings = 0;
+  for (let i = 0; i < segments.length; i++) {
+    for (let j = i + 1; j < segments.length; j++) {
+      const s = segments[i], t = segments[j];
+      if (s.a === t.a || s.a === t.b || s.b === t.a || s.b === t.b) continue;
+      if (turn(s.p, s.q, t.p) * turn(s.p, s.q, t.q) < 0 && turn(t.p, t.q, s.p) * turn(t.p, t.q, s.q) < 0) crossings++;
+    }
+  }
+  return { lines: lines.length, between_groups: betweenGroups, total_length: Math.round(length), lines_over_other_groups: overOtherGroups, straight_line_crossings: crossings };
 }
 
 function seededRandom(seed) {
@@ -280,14 +292,47 @@ function optimizeBoxes(boxes, { gap, padding, header, groupGap, keepOnEdge }) {
     return rows.length;
   };
 
+  // Cost of a layout: the lines' length, plus their crossings. A crossing is
+  // judged on the straight line between the two tables' centres, and is worth
+  // the length of one table plus the gap. Counting crossings is quadratic, so
+  // very large diagrams are judged on length alone.
+  const tablesAll = boxes.flatMap((b) => b.tables);
+  const crossWeight = gap + tablesAll.reduce((s, t) => s + (t.w + t.h) / 2, 0) / Math.max(1, tablesAll.length);
+  const countCrossings = lines.length <= 250;
+  const lineIndex = new Map(lines.map((l, i) => [l, i]));
+  const centre = (key) => {
+    const box = boxOf.get(key);
+    const o = offsets.get(key);
+    return [box.x + o[0], box.y + o[1]];
+  };
+  const turn = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
+  const cross = (l, m) => {
+    if (l[0] === m[0] || l[0] === m[1] || l[1] === m[0] || l[1] === m[1]) return false;   // they share a table
+    const [p1, p2, p3, p4] = [centre(l[0]), centre(l[1]), centre(m[0]), centre(m[1])];
+    return turn(p1, p2, p3) * turn(p1, p2, p4) < 0 && turn(p3, p4, p1) * turn(p3, p4, p2) < 0;
+  };
   const lineCost = (subset = lines) => {
     let total = 0;
     for (const [a, b] of subset) {
-      const boxA = boxOf.get(a);
-      const boxB = boxOf.get(b);
-      const oa = offsets.get(a);
-      const ob = offsets.get(b);
-      total += Math.hypot(boxA.x + oa[0] - boxB.x - ob[0], boxA.y + oa[1] - boxB.y - ob[1]);
+      const [ax, ay] = centre(a);
+      const [bx, by] = centre(b);
+      total += Math.hypot(ax - bx, ay - by);
+    }
+    if (countCrossings) {
+      let crossings = 0;
+      if (subset === lines) {
+        for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) if (cross(lines[i], lines[j])) crossings++;
+      } else {
+        // a pair of lines both in the subset is counted once
+        const own = new Set(subset);
+        for (const l of subset) {
+          for (const m of lines) {
+            if (m === l || (own.has(m) && lineIndex.get(m) < lineIndex.get(l))) continue;
+            if (cross(l, m)) crossings++;
+          }
+        }
+      }
+      total += crossings * crossWeight;
     }
     return total;
   };
@@ -400,13 +445,16 @@ function organize({
   keep_on_edge = [],
   keep_arrangement = false,
   table_gap = 36,
+  group_gap = null,
   label_space = false,
 }) {
   const d = diagram();
   const GAP = Math.max(16, Math.min(300, table_gap));
   const PADDING = Math.max(36, Math.round(GAP * 0.75));
   const HEADER = label_space ? LABEL_HEADER : 44;
-  const GROUP_GAP = optimize_lines || keep_arrangement ? 220 : 80;
+  const GROUP_GAP = group_gap != null
+    ? Math.max(40, Math.min(4000, group_gap))
+    : optimize_lines || keep_arrangement ? 220 : 80;
   const showStats = optimize_lines || keep_arrangement;
   const statsBefore = showStats ? lineStats() : null;
 

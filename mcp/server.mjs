@@ -267,7 +267,11 @@ const TOOLS = [
         table_gap: {
           type: 'number',
           default: 36,
-          description: 'Space between tables, 16 to 300.',
+          description: 'Space between tables, 16 to 300. "Arrange lines straight" then keeps parallel lines a third of this apart where there is room.',
+        },
+        group_gap: {
+          type: 'number',
+          description: 'Space between group boxes, 40 to 4000. Default: 220 with optimize_lines or keep_arrangement, else 80.',
         },
         label_space: {
           type: 'boolean',
