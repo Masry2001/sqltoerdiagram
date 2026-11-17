@@ -1100,6 +1100,19 @@ $('btn-new').addEventListener('click', () => { fileMenu.hidden = true; if (newDo
 if (isEmbed) docBtn.closest('.doc-wrap').hidden = true;
 syncDocUI();
 
+// Handle for the MCP bridge (mcp/bridge.js): list "My diagrams", open one,
+// or create one, the same way the header menu does
+window.__dbdigaDocs = {
+  current: () => ({ id: store.currentId, name: store.current.name }),
+  list: () => store.list().map((d) => ({ id: d.id, name: d.name, tables: d.tables || 0, updatedAt: d.updatedAt, open: d.id === store.currentId })),
+  open: (id) => { switchDoc(id); return store.currentId === id; },
+  create(name, content = { sql: '' }) {
+    const id = store.create(name, content);
+    if (id) switchDoc(id);
+    return id;
+  },
+};
+
 // ---- splitter (resize editor pane) ----
 const splitter = $('splitter');
 const editorPane = $('editor-pane');

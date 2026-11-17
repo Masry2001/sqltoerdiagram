@@ -155,23 +155,53 @@ const TOOLS = [
     handler: async (args) => asText(await send('get', args)),
   },
   {
+    name: 'diagram_list_diagrams',
+    description: 'List the diagrams saved in the browser ("My diagrams"): id, name, table count, and which one is open.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => asText(await send('diagrams')),
+  },
+  {
+    name: 'diagram_open_diagram',
+    description: 'Switch the app to another saved diagram, by id or by name. The open diagram is kept as it is, as in the header menu.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+    handler: async (args) => asText(await send('open_diagram', args)),
+  },
+  {
+    name: 'diagram_new_diagram',
+    description: 'Create a new saved diagram and open it. Optionally start it from a project file (.json); otherwise it starts empty. The open diagram is kept.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' }, path: { type: 'string', description: 'A project file to start from.' } },
+      required: ['name'],
+    },
+    handler: async ({ name, path }) => {
+      let project;
+      if (path) {
+        project = JSON.parse(await readFile(await jsonPath(path), 'utf8'));
+        if (typeof project.sql !== 'string') throw new Error('That file is not a diagram project: it has no "sql" text.');
+      }
+      return asText(await send('new_diagram', { name, project }));
+    },
+  },
+  {
     name: 'diagram_load_project',
-    description: 'Open a saved project (.json) in the diagram, replacing what is open.',
-    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-    handler: async ({ path }) => {
+    description: 'Open a saved project (.json) in the diagram, replacing what is open. Pass diagram (the name of the diagram you expect to be open) to refuse loading into any other one.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' }, diagram: { type: 'string' } }, required: ['path'] },
+    handler: async ({ path, diagram }) => {
       const project = JSON.parse(await readFile(await jsonPath(path), 'utf8'));
       if (typeof project.sql !== 'string') throw new Error('That file is not a diagram project: it has no "sql" text.');
-      return asText(await send('load', { project }));
+      return asText(await send('load', { project, diagram }));
     },
   },
   {
     name: 'diagram_load_sql',
-    description: 'Draw or change the schema from SQL (CREATE TABLE statements with foreign keys). Tables that keep their name keep their position; new ones are placed beside them.',
+    description: 'Draw or change the schema from SQL (CREATE TABLE statements with foreign keys). Tables that keep their name keep their position; new ones are placed beside them. Pass diagram (the name of the diagram you expect to be open) to refuse loading into any other one.',
     inputSchema: {
       type: 'object',
       properties: {
         sql: { type: 'string' },
         dialect: { type: 'string', enum: ['postgres', 'mysql', 'sqlite', 'sqlserver', 'snowflake'] },
+        diagram: { type: 'string', description: 'Name of the diagram expected to be open.' },
       },
       required: ['sql'],
     },

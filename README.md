@@ -213,6 +213,12 @@ what changed.
    - *"Draw an ER diagram from schema.sql"*
    - *"Group these tables by business domain and straighten the lines"*
    - *"Save the diagram to docs/erd.json"*
+   - *"Create a new diagram called New ERD from new.json, then switch back to the old one"*
+
+   The agent can list, open and create diagrams in "My diagrams"
+   (`diagram_list_diagrams`, `diagram_open_diagram`, `diagram_new_diagram`).
+   The load tools take an optional `diagram` name and refuse to load into any
+   other diagram, so a load never replaces the wrong one.
 
 ### Options
 

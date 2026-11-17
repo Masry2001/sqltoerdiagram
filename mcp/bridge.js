@@ -1,6 +1,7 @@
 // Browser side of the MCP server (mcp/server.mjs). Loaded by the dev server only
-// (see mcpBridge in vite.config.js). It uses the app's own debug handle and file
-// input, so the app itself needs no changes.
+// (see mcpBridge in vite.config.js). It uses the app's own debug handles
+// (window.__dbdiga for the canvas, window.__dbdigaDocs for "My diagrams") and
+// its file input.
 import { layout } from '/src/layout.js';
 
 const BRIDGE_URL = 'http://127.0.0.1:5199';
@@ -38,9 +39,12 @@ function resolveKeys(names = []) {
   return { keys, unknown };
 }
 
+const docs = () => window.__dbdigaDocs;
+
 function summary() {
   const d = diagram();
   return {
+    diagram: docs()?.current().name,
     tables: d.model.tables.length,
     relations: d.model.relations.length,
     manual_links: d.manualLinks.length,
@@ -613,12 +617,64 @@ function screenshot({ tables, max_size = 1800 }) {
   }
 }
 
+// A load replaces the open diagram. When the caller names the diagram it
+// expects to be open, refuse to load into any other one.
+function expectOpen(name) {
+  if (name == null) return;
+  const open = docs().current().name;
+  if (open.toLowerCase() !== String(name).trim().toLowerCase()) {
+    throw new Error(`The open diagram is "${open}", not "${name}". Open "${name}" first (diagram_open_diagram).`);
+  }
+}
+
+// Finds one diagram by id, or by name (exact, ignoring case).
+function findDiagram({ id, name }) {
+  const all = docs().list();
+  if (id) {
+    const hit = all.find((d) => d.id === id);
+    if (!hit) throw new Error(`No diagram has the id "${id}".`);
+    return hit;
+  }
+  if (!name) throw new Error('Give the diagram id or name.');
+  const hits = all.filter((d) => d.name.toLowerCase() === String(name).trim().toLowerCase());
+  if (!hits.length) throw new Error(`No diagram is named "${name}". Diagrams: ${all.map((d) => `"${d.name}"`).join(', ')}.`);
+  if (hits.length > 1) throw new Error(`${hits.length} diagrams are named "${name}"; give the id: ${hits.map((d) => d.id).join(', ')}.`);
+  return hits[0];
+}
+
+// The parts of a project file the app keeps for one diagram.
+function projectContent(project) {
+  if (!project) return { sql: '' };
+  return {
+    sql: project.sql,
+    dialect: project.dialect,
+    format: project.format,
+    layout: {
+      positions: project.positions, camera: project.camera, annotations: project.annotations, hidden: project.hidden,
+      manualLinks: project.manualLinks, edgeBends: project.edgeBends, edgeAnchors: project.edgeAnchors, edgePaths: project.edgePaths,
+    },
+  };
+}
+
 const OPS = {
   status: () => summary(),
   get: getDiagram,
   project: currentProject,
-  load: ({ project }) => loadProject(project),
-  load_sql: ({ sql, dialect }) => {
+  diagrams: () => ({ open: docs().current(), diagrams: docs().list() }),
+  open_diagram: (args) => {
+    const target = findDiagram(args);
+    if (!docs().open(target.id)) throw new Error(`Could not open "${target.name}".`);
+    return summary();
+  },
+  new_diagram: ({ name, project }) => {
+    if (!String(name || '').trim()) throw new Error('Give the new diagram a name.');
+    const id = docs().create(String(name).trim(), projectContent(project));
+    if (!id) throw new Error("This browser's storage is full. Delete a diagram first.");
+    return { id, ...summary() };
+  },
+  load: ({ project, diagram: expected }) => { expectOpen(expected); return loadProject(project); },
+  load_sql: ({ sql, dialect, diagram: expected }) => {
+    expectOpen(expected);
     const { positions, annotations, hidden, manualLinks, edgeBends, edgeAnchors, edgePaths } = currentProject();
     return loadProject({
       app: 'dbdiga',
