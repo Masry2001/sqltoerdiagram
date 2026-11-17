@@ -226,7 +226,8 @@ function throughTable(paths, map) {
   const all = (r) => Object.values(r.paths);
   ok(Object.keys(tidy.paths).length === edges.length && !tidy.failed.length, 'tidy routing routes every line');
   ok(orthogonal(tidy.paths) && !overlapping(tidy.paths) && !throughTable(tidy.paths, map), 'tidy lines are square, apart and clear of tables');
-  ok(countCrossings(all(tidy)) < countCrossings(all(plain)), `ordering ends by how lines arrive crosses less (${countCrossings(all(tidy))} vs ${countCrossings(all(plain))})`);
+  ok(countCrossings(all(tidy)) <= countCrossings(all(plain)), `tidy routing crosses no more than plain routing (${countCrossings(all(tidy))} vs ${countCrossings(all(plain))})`);
+  ok(countCrossings(all(tidy)) === 0, `lines choosing their own entry points don't cross here (${countCrossings(all(tidy))})`);
 }
 
 // where an end belongs on its side, from the way its line leaves
