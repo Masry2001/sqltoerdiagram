@@ -53,11 +53,12 @@ export function createStore(storage = globalThis.localStorage) {
     findByHash(hash) { return hash ? index.docs.find((d) => d.hash === hash) : undefined; },
 
     // record what the open diagram looks like now (name stays)
-    touch({ tables, hash }) {
+    touch({ tables, columns, hash }) {
       const e = entry(index.current);
       if (!e) return;
       if (e.hash !== hash) e.updatedAt = Date.now();
       e.tables = tables; e.hash = hash;
+      if (columns != null) e.columns = columns;   // optional: older entries have none yet
       write(INDEX, index);
     },
     rename(id, name) {
@@ -70,7 +71,7 @@ export function createStore(storage = globalThis.localStorage) {
     // Add a diagram (not yet open). `content` is stored for later opening.
     create(name, content, meta = {}) {
       const id = newId();
-      index.docs.push({ id, name: uniqueName(name || 'Untitled diagram'), updatedAt: Date.now(), tables: meta.tables || 0, hash: meta.hash || '' });
+      index.docs.push({ id, name: uniqueName(name || 'Untitled diagram'), updatedAt: Date.now(), tables: meta.tables || 0, ...(meta.columns != null ? { columns: meta.columns } : {}), hash: meta.hash || '' });
       if (content && !write('dbdiga-doc-' + id, content)) { index.docs.pop(); return null; }
       return write(INDEX, index) ? id : null;
     },

@@ -13,6 +13,7 @@ import { encodeShare, decodeShare } from './share.js';
 import { sanitizeAnnotations, groupColor } from './annotations.js';
 import { EXAMPLE_SQL } from './examples.js';
 import { createStore, hashText } from './store.js';
+import { countColumns } from './columns.js';
 
 const $ = (id) => document.getElementById(id);
 const sqlEl = $('sql');
@@ -75,8 +76,8 @@ function collectLayout() {
 function saveLayout() {
   try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(collectLayout())); } catch { /* quota */ }
   recordHistory();
-  // keep the diagram list's table count and "last changed" order fresh
-  if (!isEmbed) store.touch({ tables: diagram.model.tables.length, hash: hashText(sqlEl.value) });
+  // keep the diagram list's table and column counts and "last changed" order fresh
+  if (!isEmbed) store.touch({ tables: diagram.model.tables.length, columns: countColumns(diagram.model.tables), hash: hashText(sqlEl.value) });
 }
 
 // ---- undo / redo: every saved change is a step; the camera is not part of it ----
@@ -339,18 +340,29 @@ const _prevHiddenChange = diagram.onHiddenChange;
 diagram.onHiddenChange = () => { if (_prevHiddenChange) _prevHiddenChange(); renderTables(); };
 diagram.onSelectionChange = () => { renderTables(); renderSelectionInfo(); };
 
-// Next to the diagram name: how many lines the selected table has; a click
-// lists the tables at their other ends
+// Next to the diagram name: how many columns and lines the selected table
+// has; a click lists the tables at the lines' other ends
 const selWrap = $('sel-wrap'), selInfo = $('sel-info'), selMenu = $('sel-menu');
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 function renderSelectionInfo() {
+  // a selected group: how many tables and columns are inside its box
+  const group = diagram.selectedGroup();
+  if (group) {
+    selWrap.hidden = false;
+    selInfo.replaceChildren(
+      Object.assign(document.createElement('b'), { textContent: group.name }),
+      ` · ${plural(group.tables.length, 'table')} · ${plural(group.columns, 'column')} ▾`,
+    );
+    if (!selMenu.hidden) renderSelectionMenu();
+    return;
+  }
   const info = diagram.selectionLines();
   selWrap.hidden = !info;
   if (!info) { selMenu.hidden = true; return; }
   const who = info.names.length === 1 ? info.names[0] : plural(info.names.length, 'table');
   selInfo.replaceChildren(
     Object.assign(document.createElement('b'), { textContent: who }),
-    ` · ${plural(info.relations, 'relation')} · ${info.dashed} dashed ▾`,
+    ` · ${plural(info.columns, 'column')} · ${plural(info.relations, 'relation')} · ${info.dashed} dashed ▾`,
   );
   if (!selMenu.hidden) renderSelectionMenu(info);
 }
@@ -358,6 +370,8 @@ function renderSelectionInfo() {
 // them; a click shows that line alone, with its two tables
 function renderSelectionMenu(info = diagram.selectionLines()) {
   selMenu.replaceChildren();
+  const group = diagram.selectedGroup();
+  if (group) { renderGroupMenu(group); return; }
   if (!info) return;
   for (const dashed of [false, true]) {
     const lines = info.lines.filter((l) => l.dashed === dashed)
@@ -390,6 +404,34 @@ function renderSelectionMenu(info = diagram.selectionLines()) {
     selMenu.appendChild(list);
   }
 }
+// a selected group's tables, each with its column count; a click centres on it
+function renderGroupMenu(group) {
+  const label = document.createElement('div');
+  label.className = 'menu-label';
+  label.textContent = `${group.name} · ${plural(group.tables.length, 'table')} · ${plural(group.columns, 'column')}`;
+  selMenu.appendChild(label);
+  if (!group.tables.length) {
+    const none = document.createElement('div');
+    none.className = 'sel-none';
+    none.textContent = 'No tables inside this group';
+    selMenu.appendChild(none);
+    return;
+  }
+  const list = document.createElement('div');
+  list.className = 'sel-list';
+  for (const t of [...group.tables].sort((a, b) => a.name.localeCompare(b.name))) {
+    const row = document.createElement('button');
+    row.className = 'sel-row';
+    row.title = `${t.name}
+Click to show this table`;
+    const nm = document.createElement('span'); nm.className = 'sel-row-name'; nm.textContent = t.name;
+    const col = document.createElement('span'); col.className = 'sel-row-cols'; col.textContent = plural(t.columns, 'column');
+    row.append(nm, col);
+    row.addEventListener('click', () => { selMenu.hidden = true; diagram.centerOn(t.key); });
+    list.appendChild(row);
+  }
+  selMenu.appendChild(list);
+}
 // Next to the diagram name: the highlighted line and the two tables it joins
 const lineInfo = $('line-info');
 function renderLineInfo() {
@@ -397,9 +439,18 @@ function renderLineInfo() {
   lineInfo.hidden = !line;
   if (!line) return;
   const end = (table, col) => [Object.assign(document.createElement('b'), { textContent: table }), '.' + col];
+  const describe = (l) => `${l.from}.${l.fromCol} → ${l.to}.${l.toCol}` + (l.dashed ? ' (dashed: drawn by hand or inferred)' : ' (foreign key)');
+  if (line.lines) {
+    // a clicked foreign-key column with several lines: every table it points to
+    const ends = line.lines.flatMap((l, i) => [...(i ? [', '] : []), ...end(l.to, l.toCol)]);
+    const kind = Object.assign(document.createElement('span'), { className: 'line-kind', textContent: plural(line.lines.length, 'line') });
+    lineInfo.replaceChildren(...end(line.from, line.fromCol), ' → ', ...ends, kind);
+    lineInfo.title = line.lines.map(describe).join('\n');
+    return;
+  }
   const kind = Object.assign(document.createElement('span'), { className: 'line-kind', textContent: line.dashed ? 'dashed' : 'relation' });
   lineInfo.replaceChildren(...end(line.from, line.fromCol), ' → ', ...end(line.to, line.toCol), kind);
-  lineInfo.title = `${line.from}.${line.fromCol} → ${line.to}.${line.toCol}` + (line.dashed ? ' (dashed: drawn by hand or inferred)' : ' (foreign key)');
+  lineInfo.title = describe(line);
 }
 diagram.onPinnedEdgeChange = renderLineInfo;
 
@@ -515,12 +566,13 @@ function updateStatus(result, sql) {
   emptyEl.style.display = hasTables ? 'none' : 'grid';
   const nT = result.tables.length;
   const nR = result.relations.length;
+  const nC = countColumns(result.tables);   // every table's columns, hidden ones too, like nT
   if (!hasTables && sql.trim()) {
     statusEl.textContent = result.errors[0] || 'No CREATE TABLE found';
     statusEl.className = 'status warn';
   } else if (hasTables) {
     const fmt = result.format && result.format !== 'sql' ? `${FORMATS[result.format] || result.format} · ` : '';
-    statusEl.textContent = `${fmt}${nT} table${nT !== 1 ? 's' : ''} · ${nR} relation${nR !== 1 ? 's' : ''}`;
+    statusEl.textContent = `${fmt}${nT} table${nT !== 1 ? 's' : ''} · ${nC} column${nC !== 1 ? 's' : ''} · ${nR} relation${nR !== 1 ? 's' : ''}`;
     statusEl.className = 'status ok';
   } else {
     statusEl.textContent = '';
@@ -1099,7 +1151,8 @@ function renderDocMenu() {
     open.className = 'doc-open';
     const nm = document.createElement('span'); nm.className = 'doc-row-name'; nm.textContent = d.name;
     const sub = document.createElement('span'); sub.className = 'doc-row-sub';
-    sub.textContent = `${d.tables || 0} table${d.tables === 1 ? '' : 's'}`;
+    sub.textContent = `${d.tables || 0} table${d.tables === 1 ? '' : 's'}`
+      + (d.columns != null ? ` · ${d.columns} column${d.columns === 1 ? '' : 's'}` : '');
     open.append(nm, sub);
     open.addEventListener('click', () => { docMenu.hidden = true; switchDoc(d.id); });
     const del = document.createElement('button');

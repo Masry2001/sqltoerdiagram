@@ -3,6 +3,7 @@
 // (window.__dbdiga for the canvas, window.__dbdigaDocs for "My diagrams") and
 // its file input.
 import { layout } from '/src/layout.js';
+import { countColumns } from '/src/columns.js';
 
 const BRIDGE_URL = 'http://127.0.0.1:5199';
 const GROUP_COLORS = ['blue', 'green', 'amber', 'purple'];
@@ -46,6 +47,7 @@ function summary() {
   return {
     diagram: docs()?.current().name,
     tables: d.model.tables.length,
+    columns: countColumns(d.model.tables),
     relations: d.model.relations.length,
     manual_links: d.manualLinks.length,
     hidden: d.hidden.size,

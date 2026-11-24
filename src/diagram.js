@@ -4,6 +4,7 @@
 import { THEMES, rasterizeTable, columnY, measureTable, ROW_H, HEADER_H } from './renderer.js';
 import { NOTE_COLORS, GROUP_COLORS, NOTE_ORDER, GROUP_ORDER, makeAnnotation, groupColor, isHexColor } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
+import { columnLines, countColumns } from './columns.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
 import { arrangeLines } from './line-arranger.js';
@@ -51,7 +52,7 @@ export class Diagram {
     this.pan = null;               // active background pan
     this.hover = null;             // table under cursor (transient highlight)
     this.hoverEdge = null;         // id of the line under the cursor
-    this._pinnedEdge = null;       // clicked line {id, fromKey, toKey} (sticky focus), see pinnedEdge
+    this._pinnedEdge = null;       // clicked line {id, fromKey, toKey}, or clicked foreign-key column {id, column, lines} (sticky focus), see pinnedEdge
     this.onPinnedEdgeChange = null; // fired when a line is clicked, released or shown from a list
     this.pressEdge = null;         // line under an in-progress click
     this.edgeBends = {};           // line id -> {x, y} offset of its midpoint
@@ -123,14 +124,38 @@ export class Diagram {
 
   // The clicked line, described: its two tables and columns, and whether it
   // is a dashed link (drawn by hand or inferred). Null when no line is clicked.
+  // A clicked foreign-key column with several lines also lists each of them
+  // in `lines`.
   pinnedLine() {
     const edge = this.pinnedEdge;
     if (!edge) return null;
-    const [from, to] = edge.id.split('>');
-    const fromCol = from.slice(from.lastIndexOf('.') + 1), toCol = to.slice(to.lastIndexOf('.') + 1);
     const name = (key) => this.model.tables.find(t => t.key === key)?.name || key;
-    const dashed = this.manualLinks.some(l => `${l.from.table}.${l.from.col}>${l.to.table}.${l.to.col}` === edge.id);
-    return { from: name(edge.fromKey), fromCol, to: name(edge.toKey), toCol, dashed };
+    const describe = ({ id, fromKey, toKey }) => {
+      const [from, to] = id.split('>');
+      const fromCol = from.slice(from.lastIndexOf('.') + 1), toCol = to.slice(to.lastIndexOf('.') + 1);
+      const dashed = this.manualLinks.some(l => `${l.from.table}.${l.from.col}>${l.to.table}.${l.to.col}` === id);
+      return { from: name(fromKey), fromCol, to: name(toKey), toCol, dashed };
+    };
+    if (!edge.lines) return describe(edge);
+    const lines = edge.lines.map(describe);
+    if (lines.length === 1) return lines[0];
+    // named by the clicked column, not the first column of a composite key
+    return { ...lines[0], fromCol: edge.column.col, lines };
+  }
+
+  // Ids of the lines a click put in focus: the clicked line, or every line of
+  // a clicked foreign-key column. Null when nothing is clicked.
+  _pinnedLineIds() {
+    const edge = this.pinnedEdge;
+    if (!edge) return null;
+    return new Set(edge.lines ? edge.lines.map(l => l.id) : [edge.id]);
+  }
+
+  // Keys of the tables at the ends of the clicked line(s); they stay bright.
+  _pinnedLineTables() {
+    const edge = this.pinnedEdge;
+    if (!edge) return null;
+    return new Set((edge.lines || [edge]).flatMap(l => [l.fromKey, l.toKey]));
   }
 
   // The table whose relationships should be emphasised: a click-pinned table
@@ -156,6 +181,25 @@ export class Diagram {
   _clearPinnedEdge() {
     if (!this.pinnedEdge) return;
     this.pinnedEdge = null;
+    this.markDirty();
+  }
+
+  // The drawn lines that leave a column (see columnLines): empty unless it is
+  // a foreign key with a line on screen (both of its tables shown).
+  _columnLines(t, col) {
+    const lines = columnLines(this.model.relations, this.manualLinks, t.key, col);
+    if (!lines.length) return lines;
+    const drawn = new Set(this._routes().map(seg => seg.id));
+    return lines.filter(l => drawn.has(l.id));
+  }
+
+  // Pins a clicked foreign-key column: only its lines and the tables they
+  // join stay bright, as when a line is clicked. Clicked again, it lets go.
+  _pinColumn(t, col, lines) {
+    this.pinned = null;
+    this.pinnedKeys = null;
+    const id = `column:${t.key}.${col}`;
+    this.pinnedEdge = this.pinnedEdge?.id === id ? null : { id, column: { tableKey: t.key, col }, lines };
     this.markDirty();
   }
 
@@ -274,12 +318,13 @@ export class Diagram {
     // tables
     const pinned = this.pinned;
     const pinnedEdge = this.pinnedEdge;
+    const pinnedEdgeTables = this._pinnedLineTables();
     for (const t of this.model.tables) {
       if (!Number.isFinite(t.x) || this.hidden.has(t.key)) continue;
       if (t.x > vx1 + margin || t.x + t.w < vx0 - margin ||
           t.y > vy1 + margin || t.y + t.h < vy0 - margin) continue;
       const bm = this._bitmap(t);
-      const onPinnedEdge = pinnedEdge && (pinnedEdge.fromKey === t.key || pinnedEdge.toKey === t.key);
+      const onPinnedEdge = pinnedEdge && pinnedEdgeTables.has(t.key);
       const dim = pinnedEdge ? !onPinnedEdge : pinned && !this.pinnedKeys.has(t.key);
       ctx.save();
       ctx.globalAlpha = dim ? 0.22 : 1;
@@ -570,6 +615,28 @@ export class Diagram {
     }
     ctx.restore();
     return null;
+  }
+
+  // The selected annotation. Selecting or clearing it tells the header, so a
+  // selected group can show how many tables and columns it holds.
+  get selectedAnno() { return this._selectedAnno ?? null; }
+  set selectedAnno(a) {
+    if (a === this._selectedAnno) return;
+    this._selectedAnno = a;
+    this.onSelectionChange?.();
+  }
+
+  // The selected group: its name, the visible tables inside its box (each
+  // with its column count) and their total columns. null if none.
+  selectedGroup() {
+    const a = this.selectedAnno;
+    if (!a || a.type !== 'group') return null;
+    const tables = this._tablesInGroup(a).filter((t) => !this.hidden.has(t.key));
+    return {
+      name: (a.text || '').trim() || 'Group',
+      tables: tables.map((t) => ({ key: t.key, name: t.name, columns: t.columns?.length || 0 })),
+      columns: countColumns(tables),
+    };
   }
 
   // The tables that belong to a group: those whose centre is inside its box.
@@ -1385,25 +1452,27 @@ export class Diagram {
     // where straight lines cross, the horizontal one jumps over the other
     const straight = routes.filter((seg) => seg.path).map((seg) => ({ id: seg.id, points: seg.path }));
     this._jumps = straight.length ? pathJumps(straight, JUMP_RADIUS + 1) : null;
-    if (this.pinnedEdge && !routes.some(seg => seg.id === this.pinnedEdge.id)) this.pinnedEdge = null;
+    let pinnedIds = this._pinnedLineIds();
+    if (pinnedIds && !routes.some(seg => pinnedIds.has(seg.id))) { this.pinnedEdge = null; pinnedIds = null; }
 
-    const pinnedEdgeId = this.pinnedEdge?.id ?? null;
-    const focus = pinnedEdgeId ? null : this.focus;
+    const focus = pinnedIds ? null : this.focus;
     const focusKey = focus ? focus.key : null;
-    const hoverEdge = pinnedEdgeId ?? (focusKey ? null : this.hoverEdge);
-    const fadeAlpha = this.pinned || pinnedEdgeId ? 0.05 : 0.16;   // pinned fades harder than transient hover
+    const hoverEdge = pinnedIds || focusKey ? null : this.hoverEdge;
+    const fadeAlpha = this.pinned || pinnedIds ? 0.05 : 0.16;   // pinned fades harder than transient hover
     const highlighted = [];
 
     for (const seg of routes) {
       const xs = seg.path ? seg.path.map((p) => p[0]) : [seg.fx, seg.c1x, seg.c2x, seg.tx];
       const ys = seg.path ? seg.path.map((p) => p[1]) : [seg.fy, seg.c1y, seg.c2y, seg.ty];
       if (Math.max(...xs) < vx0 || Math.min(...xs) > vx1 || Math.max(...ys) < vy0 || Math.min(...ys) > vy1) continue;
-      const connected = focusKey
-        ? seg.fromKey === focusKey || seg.toKey === focusKey
-        : seg.id === hoverEdge;
+      const connected = pinnedIds
+        ? pinnedIds.has(seg.id)
+        : focusKey
+          ? seg.fromKey === focusKey || seg.toKey === focusKey
+          : seg.id === hoverEdge;
       if (connected) {
         highlighted.push(seg);
-      } else if (focusKey || hoverEdge) {
+      } else if (pinnedIds || focusKey || hoverEdge) {
         this._stroke(seg, theme.edge, 1.2, fadeAlpha, seg.manual);
       } else {
         this._stroke(seg, theme.edge, 1.5, 0.5, seg.manual);
@@ -1759,7 +1828,8 @@ export class Diagram {
         this.dragGroup = { items, ax: w.x, ay: w.y, moved: false };
       } else {
         this.selected = new Set([t]);
-        this.drag = { t, dx: w.x - t.x, dy: w.y - t.y, moved: false };
+        // the pressed column: a click on a foreign key shows its lines
+        this.drag = { t, dx: w.x - t.x, dy: w.y - t.y, moved: false, column: this._columnAt(sx, sy)?.col ?? null };
         this.onSelectionChange?.();
       }
       this.markDirty();
@@ -1954,8 +2024,14 @@ export class Diagram {
       this.dragGroup = null;
       return;
     }
-    // a click (no drag) on a table or line pins focus; a click elsewhere clears it
-    if (this.drag && !this.drag.moved) this._pin(this.drag.t);
+    // a click (no drag) on a table or line pins focus; a click elsewhere clears it.
+    // A click on a foreign-key column pins only that column's lines.
+    if (this.drag && !this.drag.moved) {
+      const { t, column } = this.drag;
+      const lines = column ? this._columnLines(t, column) : [];
+      if (lines.length) this._pinColumn(t, column, lines);
+      else this._pin(t);
+    }
     else if (this.pan && !this.pan.moved) {
       if (this.selected.size) { this.selected = new Set(); this.markDirty(); this.onSelectionChange?.(); }
       if (this.pressEdge) this._pinEdge(this.pressEdge);
@@ -2069,6 +2145,7 @@ export class Diagram {
     for (const l of this.manualLinks) add(true, l.from.table, l.from.col, l.to.table, l.to.col);
     return {
       names: [...this.selected].map(t => t.name),
+      columns: countColumns(this.selected),
       relations: lines.filter(l => !l.dashed).length,
       dashed: lines.filter(l => l.dashed).length,
       lines,
@@ -2187,6 +2264,12 @@ export class Diagram {
     delete this.edgeAnchors[id];
     delete this.edgePaths[id];
     if (this.pinnedEdge?.id === id) this.pinnedEdge = null;
+    else if (this.pinnedEdge?.lines?.some(l => l.id === id)) {
+      // a clicked column keeps its other lines
+      const lines = this.pinnedEdge.lines.filter(l => l.id !== id);
+      if (!lines.length) this.pinnedEdge = null;
+      else { this.pinnedEdge = { ...this.pinnedEdge, lines }; this.onPinnedEdgeChange?.(); }   // same id: report it here
+    }
     this.markDirty();
     this.onLayoutChange?.();
   }

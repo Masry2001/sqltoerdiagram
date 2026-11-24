@@ -264,8 +264,10 @@ function parseTableBody(body, base, table, relations) {
       }
       continue;
     }
-    if (head === 'key' || head === 'index' || head === 'check' ||
-        head === 'fulltext' || head === 'spatial') continue;
+    if (head === 'check' || head === 'fulltext' || head === 'spatial') continue;
+    // MySQL `KEY [name] (cols)` / `INDEX [name] (cols)` is an index, but a
+    // column may also be named key or index (`key text primary key`).
+    if ((head === 'key' || head === 'index') && isIndexClause(item)) continue;
 
     // column definition
     const nameTok = tokens[0];
@@ -322,6 +324,21 @@ function parseTableBody(body, base, table, relations) {
       });
     }
   }
+}
+
+// Column types that take a size in parentheses, e.g. `key varchar(255)`.
+const SIZED_TYPES = new Set(['varchar', 'char', 'character', 'nvarchar', 'nchar', 'varbinary',
+  'binary', 'bit', 'decimal', 'numeric', 'dec', 'float', 'double', 'real', 'int', 'integer',
+  'bigint', 'smallint', 'tinyint', 'mediumint', 'number', 'varchar2', 'nvarchar2', 'raw',
+  'time', 'timestamp', 'timestamptz', 'datetime', 'datetime2', 'interval', 'enum', 'set', 'string']);
+
+// True when a body item that starts with KEY or INDEX is an index definition
+// (`KEY idx_a (a, b)`, `INDEX (a)`), false when it is a column named key/index.
+export function isIndexClause(item) {
+  const m = /^\s*(?:key|index)\s*(?:([`"\[]?[\w$]+[`"\]]?)\s*)?\(/i.exec(item);
+  if (!m) return false;
+  if (m[1] && SIZED_TYPES.has(m[1].replace(/[`"\[\]]/g, '').toLowerCase())) return false;
+  return true;
 }
 
 // Mark a table-level key clause's columns and record their spans for renames.
