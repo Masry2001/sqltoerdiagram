@@ -76,11 +76,12 @@ const edge = (fromKey, fromCol, toKey, toCol) => ({ fromKey, fromCol, toKey, toC
   ok(routeEdges([edge('a', 'id', 'b', 'id')], map, (k) => k === 'b').length === 0, 'hidden tables have no line');
 }
 
-// a self reference still gets a curve
+// a self reference is a small loop at a top corner
 {
   const a = table('a', 0, 0);
   const [r] = routeEdges([edge('a', 'b', 'a', 'id')], byKey(a));
-  ok(r.axis === 'h' && r.fx !== r.tx, 'self reference leaves and returns on opposite sides');
+  ok(r.fx !== r.tx && r.fromSide === 'right' && r.toSide === 'top', 'self reference leaves the side and returns on the top');
+  ok(r.loop && r.loop.points.length === 5, 'self reference carries its loop');
 }
 
 // a bend moves the line's midpoint by exactly its offset and keeps the ends

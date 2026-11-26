@@ -11,7 +11,12 @@
 //  - Afterwards parallel lines move apart, as far as the room around them
 //    allows (spreadParallel).
 //
+//  - A table's line to itself is a small loop at a top corner (self-loop.js),
+//    and other lines keep out of the corner it takes.
+//
 // Pure functions: no DOM, so the router can be tested in Node.
+import { selfLoopPaths, selfLoopArea, selfLoopCorner } from './self-loop.js';
+
 export const GRID = 16;
 
 // Working arrays, kept between runs: allocating tens of megabytes on every
@@ -30,7 +35,10 @@ function scratch(name, Type, length, clear) {
   if (clear) view.fill(0);
   return view;
 }
-const CLEARANCE = GRID;        // space kept free around every table
+const CLEARANCE = GRID;        // space kept free around every table (option: clearance)
+const GROUP_MARGIN = 24;       // lines keep this far from group box edges they run along (option: groupMargin)
+const GROUP_EDGE_COST = 4;     // each step along a group box edge, closer than groupMargin
+export const MIN_LINE_GAP = 24;  // parallel lines keep at least this far apart where there is room (option: lineGap)
 const PAD_CELLS = 24;          // free border around the whole diagram
 const BEND_COST = 16;            // a turn costs as much as this many extra steps
 const GROUP_COST = 6;           // each step inside a group the line doesn't belong to
@@ -79,6 +87,15 @@ export function autoLineGap(tables) {
   if (!gaps.length) return 0;
   gaps.sort((p, q) => p - q);
   return gaps[gaps.length >> 1] / 3;
+}
+
+// A spacing option (px): the given number, or the default when it is missing.
+const spacingOr = (value, fallback) => (value != null && value !== '' && Number.isFinite(+value) ? Math.max(0, +value) : fallback);
+
+// The space to keep between parallel lines: the given one, or else a third of
+// the usual space between tables (autoLineGap), but at least MIN_LINE_GAP.
+export function lineGapFor(tables, lineGap = null) {
+  return spacingOr(lineGap, null) ?? Math.max(MIN_LINE_GAP, autoLineGap(tables));
 }
 
 // Sides of a table ranked by how directly they face the other table.
@@ -163,13 +180,21 @@ const bucketQueue = new BucketQueue();
 // groups: [{x, y, w, h}] group boxes; a line avoids crossing a group that
 //   holds neither of its two tables (it can, when there is no other way).
 // lineGap: space (px) to keep between parallel lines where there is room;
-//   by default a third of the usual space between tables (autoLineGap).
-export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false, groups = [], crossCost = fast ? FAST_CROSS_COST : CROSS_COST, bendCost = BEND_COST, passes = 0, hint = null, lineGap = null, endSides = 3 } = {}) {
+//   by default a third of the usual space between tables, at least
+//   MIN_LINE_GAP (lineGapFor).
+// groupMargin: lines avoid running along a group box edge closer than this
+//   (px); crossing the edge straight across costs nothing extra.
+// clearance: space (px) kept free around every table.
+// loopCorners: {tableKey: 'left' | 'right'} the top corner a table's loop to
+//   itself takes; by default the one the other lines are expected to leave free.
+export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false, groups = [], crossCost = fast ? FAST_CROSS_COST : CROSS_COST, bendCost = BEND_COST, passes = 0, hint = null, lineGap = null, endSides = 3, groupMargin = GROUP_MARGIN, clearance = CLEARANCE, loopCorners = null } = {}) {
   let tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !isHidden(t.key));
+  clearance = spacingOr(clearance, CLEARANCE);
+  groupMargin = spacingOr(groupMargin, GROUP_MARGIN);
   // entry points closer than this many grid lines on a table edge cost extra.
   // (Lines are not kept apart while routed: that cost crossings and turns on
   // busy diagrams. routeStraightTidy moves them apart afterwards instead.)
-  const NEAR = Math.max(2, Math.round((lineGap ?? autoLineGap(tables)) / GRID) - 1);
+  const NEAR = Math.max(2, Math.round(lineGapFor(tables, lineGap) / GRID) - 1);
   if (area) {
     const own = new Set(edges.flatMap((e) => [e.fromKey, e.toKey]));
     tables = tables.filter((t) => own.has(t.key)
@@ -191,10 +216,10 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   const blocked = scratch('blocked', Uint8Array, size, true);
   const box = new Map();   // table key -> its blocked cell range
   for (const t of tables) {
-    const c0 = Math.max(0, Math.ceil((t.x - CLEARANCE - ox) / GRID));
-    const c1 = Math.min(cols - 1, Math.floor((t.x + t.w + CLEARANCE - ox) / GRID));
-    const r0 = Math.max(0, Math.ceil((t.y - CLEARANCE - oy) / GRID));
-    const r1 = Math.min(rows - 1, Math.floor((t.y + t.h + CLEARANCE - oy) / GRID));
+    const c0 = Math.max(0, Math.ceil((t.x - clearance - ox) / GRID));
+    const c1 = Math.min(cols - 1, Math.floor((t.x + t.w + clearance - ox) / GRID));
+    const r0 = Math.max(0, Math.ceil((t.y - clearance - oy) / GRID));
+    const r1 = Math.min(rows - 1, Math.floor((t.y + t.h + clearance - oy) / GRID));
     box.set(t.key, { c0, c1, r0, r1 });
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) blocked[at(c, r)] = 1;
   }
@@ -209,6 +234,25 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     const r0 = Math.max(0, Math.ceil((g.y - oy) / GRID)), r1 = Math.min(rows - 1, Math.floor((g.y + g.h - oy) / GRID));
     for (let r = r0; r <= r1; r++) groupAt.fill(g.id, at(c0, r), at(c1, r) + 1);
   }
+  // group box edges: a line running along one, closer than groupMargin, pays
+  // for each step (alongH: sideways near a top or bottom edge, alongV: up or
+  // down near a left or right edge). Crossing an edge straight across is free.
+  const alongH = scratch('alongH', Uint8Array, size, true);
+  const alongV = scratch('alongV', Uint8Array, size, true);
+  const mark = (cells, x0, x1, y0, y1) => {
+    const c0 = Math.max(0, Math.ceil((x0 - ox) / GRID)), c1 = Math.min(cols - 1, Math.floor((x1 - ox) / GRID));
+    const r0 = Math.max(0, Math.ceil((y0 - oy) / GRID)), r1 = Math.min(rows - 1, Math.floor((y1 - oy) / GRID));
+    if (c0 <= c1) for (let r = r0; r <= r1; r++) cells.fill(1, at(c0, r), at(c1, r) + 1);
+  };
+  if (groupMargin > 0) {
+    const m = groupMargin - 0.5;                     // closer than groupMargin
+    for (const g of boxes) {
+      mark(alongH, g.x - m, g.x + g.w + m, g.y - m, g.y + m);
+      mark(alongH, g.x - m, g.x + g.w + m, g.y + g.h - m, g.y + g.h + m);
+      mark(alongV, g.x - m, g.x + m, g.y - m, g.y + g.h + m);
+      mark(alongV, g.x + g.w - m, g.x + g.w + m, g.y - m, g.y + g.h + m);
+    }
+  }
   // the groups a table belongs to (its centre is inside the box)
   const groupsOf = (t) => {
     const cx = t.x + t.w / 2, cy = t.y + t.h / 2;
@@ -217,10 +261,48 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
 
   // ---- ports: every end gets its own grid line on a side ----
   const work = [];
+  const loopIds = new Map();     // table -> ids of its lines to itself
   for (const edge of edges) {
     const from = byKey.get(edge.fromKey), to = byKey.get(edge.toKey);
     if (!from || !to || !Number.isFinite(from.x) || !Number.isFinite(to.x) || isHidden(from.key) || isHidden(to.key)) continue;
+    if (from === to) { loopIds.set(from, [...(loopIds.get(from) || []), edge.id]); continue; }
     work.push({ edge, id: edge.id, from, to, ends: {}, home: boxes.length ? new Set([...groupsOf(from), ...groupsOf(to)]) : null });
+  }
+
+  // ---- a table's line to itself: a small loop at a top corner ----
+  // The corner is the one on the side fewer of the table's other lines are
+  // expected to use (lines routed here: the side facing the other table; lines
+  // that stay: their side). The loop and a margin around it become a wall, so
+  // other lines and entry points keep clear of it.
+  const loopPaths = {};
+  const tableKeyOf = (id, end) => { const part = id.split('>')[end === 'from' ? 0 : 1] || ''; return part.slice(0, part.lastIndexOf('.')); };
+  for (const [t, ids] of loopIds) {
+    const ends = [];
+    for (const item of work) {
+      for (const [end, mine, other] of [['from', item.from, item.to], ['to', item.to, item.from]]) {
+        if (mine !== t) continue;
+        const hand = anchors[item.id]?.[end];
+        ends.push({ side: hand && OUT[hand.side] ? hand.side : rankedSides(t, other)[0], other });
+      }
+    }
+    for (const [id, p] of Object.entries(keep)) {
+      if (!p?.fromSide) continue;
+      const f = tableKeyOf(id, 'from'), g = tableKeyOf(id, 'to');
+      if (f === g) continue;
+      if (f === t.key) ends.push({ side: p.fromSide, other: byKey.get(g) });
+      if (g === t.key) ends.push({ side: p.toSide, other: byKey.get(f) });
+    }
+    for (const [id, path] of Object.entries(selfLoopPaths(t, ids, ends, loopCorners?.[t.key]))) {
+      loopPaths[id] = path;
+      const a = selfLoopArea(path, GRID);
+      mark(blocked, a.x0, a.x1, a.y0, a.y1);
+    }
+  }
+  // loops that stay keep their corner too (one shaped by hand only claims its lanes)
+  for (const [id, p] of Object.entries(keep)) {
+    if (p?.hand || !Array.isArray(p?.points) || p.points.length < 2 || tableKeyOf(id, 'from') !== tableKeyOf(id, 'to')) continue;
+    const a = selfLoopArea(p, GRID);
+    mark(blocked, a.x0, a.x1, a.y0, a.y1);
   }
 
   const hOwner = scratch('hOwner', Int32Array, size, true);      // edge (c,r)-(c+1,r)
@@ -292,8 +374,6 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
       const other = end === 'from' ? item.to : item.from;
       const hand = anchors[item.id]?.[end];
       const ranking = hand && OUT[hand.side] ? [hand.side, ...rankedSides(table, other).filter((s) => s !== hand.side)] : rankedSides(table, other);
-      // a table referring to itself leaves and returns on different sides
-      if (item.from === item.to && end === 'to') ranking.push(ranking.splice(ranking.indexOf(item.ends.from?.side ?? ranking[0]), 1)[0]);
       const entry = { item, end, table, other, ranking, rank: 0, hand };
       item.ends[end] = { side: ranking[0], entry };
       listFor(table, ranking[0]).ends.push(entry);
@@ -362,7 +442,6 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   };
   const span = (item) => Math.abs(centerOf(item.from).x - centerOf(item.to).x) + Math.abs(centerOf(item.from).y - centerOf(item.to).y);
   for (const item of [...work].sort((p, q) => span(p) - span(q) || p.id.localeCompare(q.id))) {
-    if (item.from === item.to) continue;
     const ea = item.ends.from.entry, eb = item.ends.to.entry;
     const sa = item.ends.from.side, sb = item.ends.to.side;
     if (!ea || !eb || OPPOSITE[sa] !== sb || (ea.hand && eb.hand)) continue;
@@ -398,11 +477,11 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     }
   }
 
-  // Free ends: every end except a straight line's, a hand-placed one and a
-  // table's line to itself. Its line may enter anywhere along the side facing
-  // the other table, or the next best side, wherever that saves turns and
-  // crossings (fast mode keeps the spread-out entry points, for speed).
-  const isFree = (entry) => !fast && !fixedSlot.has(entry) && !entry.hand && entry.item.from !== entry.item.to;
+  // Free ends: every end except a straight line's and a hand-placed one. Its
+  // line may enter anywhere along the side facing the other table, or the next
+  // best side, wherever that saves turns and crossings (fast mode keeps the
+  // spread-out entry points, for speed).
+  const isFree = (entry) => !fast && !fixedSlot.has(entry) && !entry.hand;
   for (const list of sideLists.values()) {
     // other ends keep off the straight lines' cells
     const mine = new Set(list.ends.filter((e) => fixedSlot.has(e)).map((e) => at(fixedSlot.get(e).c, fixedSlot.get(e).r)));
@@ -542,6 +621,7 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
           : (hOwner[ncell] || (nc > 0 && hOwner[ncell - 1]));
         if (crossOwners && crossOwners !== owner) cost += crossCost;
         if (foreign[groupAt[ncell]]) cost += GROUP_COST;
+        if (horizontal ? alongH[ncell] : alongV[ncell]) cost += GROUP_EDGE_COST;
         if (goalMark[ncell] === searchId) cost += (nd !== goalDir[ncell] ? bendCost : 0) + goalPen[ncell];
         const next = ncell * 4 + nd;
         const ng = g + cost;
@@ -616,7 +696,7 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     }
   }
 
-  const paths = {};
+  const paths = { ...loopPaths };
   const failed = [];
   const overlapping = [];
   const manhattan = (item) => Math.abs(centerOf(item.from).x - centerOf(item.to).x) + Math.abs(centerOf(item.from).y - centerOf(item.to).y);
@@ -740,6 +820,7 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
       if (o && o !== owner) cost += crossCost;
       const grp = groupAt[cells[i]];
       if (grp && !item.home?.has(grp)) cost += GROUP_COST;
+      if (nd === 0 || nd === 2 ? alongH[cells[i]] : alongV[cells[i]]) cost += GROUP_EDGE_COST;
       if (i === cells.length - 1 && nd !== inDir) cost += bendCost;
       dir = nd;
     }
@@ -783,22 +864,83 @@ export function routeStraightTidy(edges, byKey, opts = {}) {
     // each line chooses its own entry points as it is routed
     best = routeStraight(edges, byKey, opts);
     // a diagram that routes quickly gets a second try, with more passes and
-    // the first try's arrival order for the ends that don't choose (a table's
-    // line to itself); the one with fewer crossings, then turns, wins
+    // the first try's arrival order for the ends that don't choose (straight
+    // lines, ends placed by hand); the one with fewer crossings, then turns, wins
+    const score = (r) => {
+      const list = Object.values(r.paths);
+      return r.failed.length * 1e9 + r.overlapping.length * 1e6 + countCrossings(list) * 1e3 + list.reduce((n, p) => n + p.points.length - 2, 0);
+    };
+    const passes = edges.length <= SECOND_TRY_LINES ? Math.max(opts.passes ?? 0, 3) : opts.passes;
     if (edges.length <= SECOND_TRY_LINES) {
-      const again = routeStraight(edges, byKey, { ...opts, passes: Math.max(opts.passes ?? 0, 3), hint: arrivalOrder(best.paths) });
-      const score = (r) => {
-        const list = Object.values(r.paths);
-        return r.failed.length * 1e9 + r.overlapping.length * 1e6 + countCrossings(list) * 1e3 + list.reduce((n, p) => n + p.points.length - 2, 0);
-      };
+      const again = routeStraight(edges, byKey, { ...opts, passes, hint: arrivalOrder(best.paths) });
       if (score(again) < score(best)) best = again;
     }
+    // a table's loop to itself took its corner before the other lines chose
+    // their sides. When the lines as routed leave the other top corner freer,
+    // route again with the loop there, and keep that unless it fails or shares
+    // more lines, or adds more than a crossing or two.
+    // When moving them all at once is worse, a few tables try on their own.
+    const trouble = (r) => r.failed.length * 1e6 + r.overlapping.length;
+    const attempt = (loopCorners) => {
+      const moved = routeStraight(edges, byKey, { ...opts, passes, hint: arrivalOrder(best.paths), loopCorners });
+      const crossings = countCrossings(Object.values(best.paths));
+      if (trouble(moved) > trouble(best) || countCrossings(Object.values(moved.paths)) > crossings + Math.max(1, Math.round(crossings * 0.02))) return false;
+      best = moved;
+      return true;
+    };
+    for (let tries = 0; tries < 2; tries++) {
+      const corners = loopCornersFor(edges, byKey, best.paths, opts.keep);
+      if (!corners) break;
+      if (attempt(corners.wanted)) continue;
+      for (const key of corners.off.slice(0, 3)) {
+        const now = loopCornersFor(edges, byKey, best.paths, opts.keep);
+        if (now?.off.includes(key)) attempt({ ...now.current, [key]: now.wanted[key] });
+      }
+      break;
+    }
   }
-  // then parallel lines move apart where there is room
+  // then parallel lines move apart where there is room, and away from the
+  // group box edges they run along. A table's loop to itself stays as it is;
+  // the other lines keep their distance from it.
   const tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !opts.isHidden?.(t.key));
-  const gap = opts.lineGap ?? autoLineGap(tables);
-  if (!opts.fast && opts.spread !== false) best.paths = spreadParallel(best.paths, { tables, gap, fixed: opts.keep });
+  const gap = lineGapFor(tables, opts.lineGap);
+  if (!opts.fast && opts.spread !== false) {
+    const selfIds = new Set(edges.filter((e) => e.fromKey === e.toKey).map((e) => e.id));
+    const loops = {}, rest = {};
+    for (const [id, p] of Object.entries(best.paths)) (selfIds.has(id) ? loops : rest)[id] = p;
+    const spread = spreadParallel(rest, { tables, gap, fixed: { ...opts.keep, ...loops }, groups: opts.groups, groupMargin: opts.groupMargin, clearance: opts.clearance });
+    best.paths = { ...spread, ...loops };
+  }
   return best;
+}
+
+// For tables with a loop to themselves: the top corner the rule in
+// selfLoopCorner picks from the sides their other lines actually use (paths,
+// plus lines that stay: keep). Returns null when every table's first loop sits
+// at that corner, else { wanted: {tableKey: corner}, current: {tableKey:
+// corner} (where the loops are now), off: [tableKey] (the ones that differ) }.
+function loopCornersFor(edges, byKey, paths, keep = {}) {
+  const loopIds = new Map();
+  for (const e of edges) if (e.fromKey === e.toKey && paths[e.id]) loopIds.set(e.fromKey, [...(loopIds.get(e.fromKey) || []), e.id]);
+  if (!loopIds.size) return null;
+  const ends = new Map([...loopIds.keys()].map((k) => [k, []]));
+  const add = (key, side, otherKey) => ends.get(key)?.push({ side, other: byKey.get(otherKey) });
+  const keyOf = (id, end) => { const part = id.split('>')[end === 'from' ? 0 : 1] || ''; return part.slice(0, part.lastIndexOf('.')); };
+  const all = { ...keep, ...paths };
+  for (const [id, p] of Object.entries(all)) {
+    if (!p?.fromSide) continue;
+    const f = keyOf(id, 'from'), t = keyOf(id, 'to');
+    if (f === t) continue;
+    add(f, p.fromSide, t);
+    add(t, p.toSide, f);
+  }
+  const wanted = {}, current = {}, off = [];
+  for (const [key, ids] of loopIds) {
+    wanted[key] = selfLoopCorner(byKey.get(key), ends.get(key));
+    current[key] = paths[[...ids].sort()[0]].fromSide;
+    if (current[key] !== wanted[key]) off.push(key);
+  }
+  return off.length ? { wanted, current, off } : null;
 }
 
 // Moves parallel lines apart, up to `gap` (px), without changing any route:
@@ -809,9 +951,15 @@ export function routeStraightTidy(edges, byKey, opts = {}) {
 // never swapping places, so a crowded spot keeps them as far apart as it has
 // room for. A line whose moves would add crossings keeps its old route.
 // paths: {id: {points, fromSide, toSide}}; fixed: {id: {points}} lines that
-// stay where they are (others keep their distance from them).
-export function spreadParallel(paths, { tables = [], gap = 0, fixed = {} } = {}) {
-  if (!(gap > GRID)) return paths;
+// stay where they are (others keep their distance from them). groups: group
+// boxes ({x, y, w, h}); a segment running along one of their edges moves to
+// groupMargin from it, where there is room. clearance: the space kept free
+// around every table.
+export function spreadParallel(paths, { tables = [], gap = 0, fixed = {}, groups = [], groupMargin = GROUP_MARGIN, clearance = CLEARANCE } = {}) {
+  groupMargin = spacingOr(groupMargin, GROUP_MARGIN);
+  clearance = spacingOr(clearance, CLEARANCE);
+  const borders = (groups || []).filter((g) => [g.x, g.y, g.w, g.h].every(Number.isFinite) && g.w > 0 && g.h > 0);
+  if (!(gap > GRID) && !(borders.length && groupMargin > 0)) return paths;
   const MIN = GRID;                                  // closest a segment comes to its own corners
   const out = {};
   for (const [id, p] of Object.entries(paths)) out[id] = { ...p, points: simplifyPath(p.points).map(([x, y]) => [x, y]) };
@@ -830,8 +978,8 @@ export function spreadParallel(paths, { tables = [], gap = 0, fixed = {} } = {})
           if (other < s.pos) lo = Math.max(lo, other + MIN); else hi = Math.min(hi, other - MIN);
         }
         for (const t of tables) {
-          const t0 = (axis ? t.y : t.x) - CLEARANCE, t1 = (axis ? t.y + t.h : t.x + t.w) + CLEARANCE;
-          const u0 = (axis ? t.x : t.y) - CLEARANCE, u1 = (axis ? t.x + t.w : t.y + t.h) + CLEARANCE;
+          const t0 = (axis ? t.y : t.x) - clearance, t1 = (axis ? t.y + t.h : t.x + t.w) + clearance;
+          const u0 = (axis ? t.x : t.y) - clearance, u1 = (axis ? t.x + t.w : t.y + t.h) + clearance;
           if (u1 <= s.a || u0 >= s.b) continue;      // the table is beside the segment's span
           if (t1 <= s.pos) lo = Math.max(lo, t1); else if (t0 >= s.pos) hi = Math.min(hi, t0);
         }
@@ -843,6 +991,17 @@ export function spreadParallel(paths, { tables = [], gap = 0, fixed = {} } = {})
   for (const [id, p] of Object.entries(out)) addSegs(id, p.points, true);
   for (const [id, p] of Object.entries(fixed || {})) if (!out[id] && Array.isArray(p?.points)) addSegs(id, p.points, false);
   if (!segs.some((s) => s.move)) return paths;
+  // group box edges: segments that don't move, kept groupMargin away from
+  if (groupMargin > 0) {
+    borders.forEach((g, i) => {
+      const id = 'group box ' + i;
+      segs.push({ id, border: true, axis: 1, pos: g.y, a: g.x, b: g.x + g.w });
+      segs.push({ id, border: true, axis: 1, pos: g.y + g.h, a: g.x, b: g.x + g.w });
+      segs.push({ id, border: true, axis: 0, pos: g.x, a: g.y, b: g.y + g.h });
+      segs.push({ id, border: true, axis: 0, pos: g.x + g.w, a: g.y, b: g.y + g.h });
+    });
+  }
+  const reach = Math.max(gap, groupMargin);
 
   // push close parallel segments apart, a little each round
   for (const axis of [0, 1]) {
@@ -852,10 +1011,10 @@ export function spreadParallel(paths, { tables = [], gap = 0, fixed = {} } = {})
       let pushed = false;
       for (let j = 0; j < list.length; j++) {
         const s = list[j];
-        for (let k = j + 1; k < list.length && list[k].pos - s.pos < gap; k++) {
+        for (let k = j + 1; k < list.length && list[k].pos - s.pos < reach; k++) {
           const t = list[k];
-          if (t.id === s.id || Math.min(s.b, t.b) - Math.max(s.a, t.a) <= 0) continue;
-          const need = gap - (t.pos - s.pos);
+          if (t.id === s.id || (s.border && t.border) || Math.min(s.b, t.b) - Math.max(s.a, t.a) <= 0) continue;
+          const need = (s.border || t.border ? groupMargin : gap) - (t.pos - s.pos);
           if (need <= 0.5) continue;
           // each side takes half; a segment that can't move leaves it to the other
           const sRoom = s.move ? s.pos - s.move.lo : 0, tRoom = t.move ? t.move.hi - t.pos : 0;
@@ -1250,12 +1409,13 @@ export function nearestSegment(points, x, y) {
 // (reported through onQuick, so they can be shown at once), then the careful
 // search for the few lines the quick pass couldn't route, around the others.
 // Holding a table and letting it go both use this, so they give the same lines.
-export function routeMoved(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, groups = [] } = {}, onQuick = null) {
-  const quick = routeStraight(edges, byKey, { anchors, isHidden, keep, groups, fast: true });
+// spacing: lineGap, groupMargin and clearance, as for routeStraight.
+export function routeMoved(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, groups = [], ...spacing } = {}, onQuick = null) {
+  const quick = routeStraight(edges, byKey, { ...spacing, anchors, isHidden, keep, groups, fast: true });
   if (!quick.failed.length) return quick;
   onQuick?.(quick);
   const rest = edges.filter((e) => quick.failed.includes(e.id));
-  const careful = routeStraight(rest, byKey, { anchors, isHidden, groups, keep: { ...keep, ...quick.paths } });
+  const careful = routeStraight(rest, byKey, { ...spacing, anchors, isHidden, groups, keep: { ...keep, ...quick.paths } });
   return {
     paths: { ...quick.paths, ...careful.paths },
     failed: careful.failed,

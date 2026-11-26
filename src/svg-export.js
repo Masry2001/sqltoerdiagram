@@ -92,15 +92,17 @@ export function exportSVG(model, themeName, annotations = [], hidden = null, edg
   }));
   const routed = routeEdges(edges, byKey, isHidden, edgeBends, edgeAnchors);
   // straight paths (Arrange lines straight) replace curves while they fit; in
-  // straight mode a line without one is drawn as a simple right angle
+  // straight mode a line without one is drawn as a simple right angle. A
+  // table's line to itself is always a small loop at a top corner.
   const facing = { right: 1, bottom: 1, left: -1, top: -1 };
   const straightMode = Object.keys(edgePaths || {}).length > 0;
   const chosen = [];
   for (const seg of routed) {
-    let path = edgePaths[seg.id];
+    let path = edgePaths?.[seg.id];
     if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
-      if (!straightMode) continue;
-      path = elbowPath(seg);
+      if (seg.loop) path = seg.loop;
+      else if (!straightMode) continue;
+      else path = elbowPath(seg);
     }
     chosen.push({ seg, path });
   }

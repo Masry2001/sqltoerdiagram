@@ -40,10 +40,10 @@ Details are in [MCP](#mcp) below.
   that goes around tables, each line enters its table at its own point, lines keep
   to their own lanes where there's room, and crossings are drawn as small
   semicircle jumps. Two tables that face each other get one straight line, with
-  no step, whenever nothing is in the way. It runs in the background, so the page
+  no step, whenever nothing is in the way. Lines keep clear of group box edges,
+  and a table's foreign key to itself is a small loop at the top corner on the
+  side with fewer lines (in every line style). It runs in the background, so the page
   stays responsive.
-- **Arrange ▾ → Arrange lines**: the curved version. It spreads entry points so no
-  two lines share one, and picks paths that avoid tables and crossings.
 - **Lines you can edit**: click a line to pin it (everything else dims), drag its
   middle to bend it, drag either end to move where it enters or leaves a table.
   On a straight line, drag any segment sideways to shape the line yourself: it
@@ -51,6 +51,11 @@ Details are in [MCP](#mcp) below.
   double-click on it makes it automatic again.
   Press **Delete** to remove a pinned manual link. A table's right-click menu lists
   its manual links, so each one can be removed on its own.
+- **Arrange ▾ → Arrange inside groups**: re-packs the tables inside each group
+  box in the order that makes lines cross least, and keeps the groups where
+  they are. A diagram without groups is arranged as one group. The spacing of
+  straight lines (between lines, from group edges, around tables) is set
+  through the MCP server and saved with the diagram.
 - **Groups**: the group name is always drawn on top. A group moves only when you
   drag its name, and its tables move with it. The fifth colour dot opens a picker
   for any hex colour.
@@ -68,8 +73,7 @@ Details are in [MCP](#mcp) below.
   it moves whole with a group, and with one table only the end on that table
   follows. If the shape would cross a table it is redrawn, keeping your sides.
 - **Search**: **Ctrl + F** finds tables and fields and jumps to them.
-- **Undo / redo**: **Ctrl + Z**, **Ctrl + Y** (or **Ctrl + Shift + Z**). Arrange
-  asks before re-arranging tables that are in groups.
+- **Undo / redo**: **Ctrl + Z**, **Ctrl + Y** (or **Ctrl + Shift + Z**).
 - **MCP server** so an AI assistant such as Claude Code can drive the open
   diagram (see [MCP](#mcp) below).
 
@@ -98,14 +102,13 @@ leaving your browser.
 
 ### Smart layout
 
-- **Hub-aware layered auto-arrange**: the most-connected table is placed on one side
-  with its related tables aligned beside it. **Horizontal / Vertical** direction and
-  **Compact / Comfortable / Spacious** spacing live under the **Arrange ▾** menu.
+- **Hub-aware layered auto-arrange** for a new diagram: the most-connected table is
+  placed on one side with its related tables aligned beside it.
 - **Overlap-free**: auto-arrange runs a separation pass so no two tables overlap.
 - **Your arrangement is saved**: positions and the camera persist automatically, so
   reloading restores your exact layout. Editing SQL keeps your manual positions —
-  only brand-new tables get auto-placed beside the rest. **Arrange** re-runs layout
-  on demand.
+  only brand-new tables get auto-placed beside the rest. **Arrange ▾ → Arrange
+  inside groups** re-packs the tables on demand.
 
 ### Edit on the canvas → SQL updates
 

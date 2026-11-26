@@ -14,6 +14,7 @@ import { sanitizeAnnotations, groupColor } from './annotations.js';
 import { EXAMPLE_SQL } from './examples.js';
 import { createStore, hashText } from './store.js';
 import { countColumns } from './columns.js';
+import { arrangeInGroups } from './group-layout.js';
 
 const $ = (id) => document.getElementById(id);
 const sqlEl = $('sql');
@@ -71,6 +72,7 @@ function collectLayout() {
     edgeBends: { ...diagram.edgeBends },
     edgeAnchors: { ...diagram.edgeAnchors },
     edgePaths: { ...diagram.edgePaths },
+    lineSpacing: { ...diagram.lineSpacing },
   };
 }
 function saveLayout() {
@@ -122,6 +124,7 @@ function applyHistoryState(state) {
       diagram.setEdgeBends(layout.edgeBends);
       diagram.setEdgeAnchors(layout.edgeAnchors);
       diagram.setEdgePaths(layout.edgePaths);
+      diagram.setLineSpacing(layout.lineSpacing);
       diagram.setAnnotations(sanitizeAnnotations(layout.annotations));
       diagram._tmapDirty = true;
       diagram.markDirty();
@@ -468,9 +471,9 @@ diagram.onLayoutChange = (...args) => { _prevLayoutChange?.(...args); renderSele
 let lastModel = null;
 let firstRender = true;
 
-// Line style, remembered in this browser: straight (the default) or curved.
-// Choosing "Arrange lines straight" or "Arrange lines" in the Arrange menu sets
-// it. While it is straight, a diagram that has no straight lines yet (a new or
+// Line style, remembered in this browser: straight (the default), or curved
+// in a browser that chose curved lines before; "Arrange lines straight" sets it
+// back to straight. While it is straight, a diagram that has no straight lines yet (a new or
 // loaded diagram, or one whose tables were just arranged) gets them on its own.
 let lineStyle = localStorage.getItem('dbdiga-lines') === 'curved' ? 'curved' : 'straight';
 function setLineStyle(style) {
@@ -489,11 +492,8 @@ function straightenByDefault({ force = false } = {}) {
   }, 150);
 }
 
-// layout options (persisted)
-const layoutOpts = {
-  dir: localStorage.getItem('dbdiga-dir') || 'LR',
-  spacing: localStorage.getItem('dbdiga-spacing') || 'comfortable',
-};
+// the automatic layout of a new diagram (or one without saved positions)
+const layoutOpts = { dir: 'LR', spacing: 'comfortable' };
 
 // input format: 'auto' detects SQL / Prisma / SQLAlchemy / Sequelize
 let formatChoice = localStorage.getItem('dbdiga-format') || 'auto';
@@ -539,6 +539,7 @@ function rebuild({ arrange = false, restore = null } = {}) {
     diagram.setEdgeBends(restore.edgeBends);         // restore lines the user has bent
     diagram.setEdgeAnchors(restore.edgeAnchors);     // restore line ends the user has moved
     diagram.setEdgePaths(restore.edgePaths);         // restore straight-arranged lines
+    diagram.setLineSpacing(restore.lineSpacing);     // straight lines' spacing (older files: defaults)
     placeNewTables(result);                          // tables not in the saved layout
     diagram.setAnnotations(sanitizeAnnotations(restore.annotations));
     if (restore.camera) diagram.setCamera(restore.camera);
@@ -659,15 +660,10 @@ function loadExample() {
 $('btn-example').addEventListener('click', loadExample);
 $('btn-example2')?.addEventListener('click', loadExample);
 
-// Arrange button: re-arrange with current opts; the ▾ part toggles the menu.
+// Arrange button: the ▾ part toggles the menu.
 const arrangeMenu = $('arrange-menu');
 function syncMenu() {
-  for (const el of arrangeMenu.querySelectorAll('[data-dir]'))
-    el.classList.toggle('active', el.dataset.dir === layoutOpts.dir);
-  for (const el of arrangeMenu.querySelectorAll('[data-spacing]'))
-    el.classList.toggle('active', el.dataset.spacing === layoutOpts.spacing);
   arrangeMenu.querySelector('[data-act="arrange-lines-straight"]').classList.toggle('active', lineStyle === 'straight');
-  arrangeMenu.querySelector('[data-act="arrange-lines"]').classList.toggle('active', lineStyle === 'curved');
 }
 syncMenu();
 
@@ -682,47 +678,49 @@ function straightenLines({ auto = false } = {}) {
     .finally(() => { button.textContent = 'Arrange'; button.disabled = false; canvas.style.cursor = ''; });
 }
 
-// The button only opens and closes the menu. Direction and spacing are settings;
-// tables move only when "Arrange tables" is chosen.
+// The button only opens and closes the menu.
 $('btn-arrange').addEventListener('click', (e) => {
   e.stopPropagation();
   arrangeMenu.hidden = !arrangeMenu.hidden;
   if (!arrangeMenu.hidden) syncMenu();
 });
-function arrangeTables() {
-  const groups = diagram.annotations.filter((a) => a.type === 'group').length;
-  if (groups && !window.confirm(
-    `Arranging moves every table and ignores your ${groups} group box${groups === 1 ? '' : 'es'}, so tables will leave them.\n\nYou can undo it with Ctrl+Z. Arrange anyway?`,
-  )) return;
+// Arrange inside groups: each group box re-packs its tables in the order that
+// makes relation lines cross least; the boxes stay where they are (a box that
+// grows or shrinks moves its neighbours, keeping the space between boxes).
+// Tables outside every box stay put; a diagram without groups is arranged as
+// one group. One Ctrl+Z undoes it, lines included.
+function arrangeInsideGroups() {
   arrangeMenu.hidden = true;
-  rebuild({ arrange: true });
+  const frames = diagram.annotations.filter((a) => a.type === 'group');
+  const visible = diagram.model.tables.filter((t) => Number.isFinite(t.x) && !diagram.hidden.has(t.key));
+  const lines = [
+    ...diagram.model.relations.map((r) => [r.fromTable.toLowerCase(), r.toTable.toLowerCase()]),
+    ...diagram.manualLinks.map((l) => [l.from.table, l.to.table]),
+  ];
+  const result = arrangeInGroups(frames, visible, lines);
+  for (const t of visible) {
+    const p = result.positions[t.key];
+    if (p) { t.x = p.x; t.y = p.y; }
+  }
+  const moved = new Map(frames.map((f, i) => [f, result.frames[i]]));
+  diagram.setAnnotations(diagram.annotations.map((a) => moved.get(a) ?? a));
+  diagram._tmapDirty = true;
+  diagram.markDirty();
+  saveLayout();
+  statusEl.textContent = `Arranged ${frames.length ? 'inside groups' : 'as one group'} · line crossings ${result.before} → ${result.after}`;
+  statusEl.className = 'status';
+  if (lineStyle === 'straight') straightenLines({ auto: true });   // joins this undo step
 }
 arrangeMenu.addEventListener('click', (e) => {
   e.stopPropagation();
   const item = e.target.closest('.menu-item');
   if (!item) return;
-  if (item.dataset.act === 'arrange') { arrangeTables(); return; }
+  if (item.dataset.act === 'arrange-groups') { arrangeInsideGroups(); return; }
   if (item.dataset.act === 'arrange-lines-straight') {
     arrangeMenu.hidden = true;
     setLineStyle('straight');
     straightenLines();
-    return;
   }
-  if (item.dataset.act === 'arrange-lines') {
-    arrangeMenu.hidden = true;
-    setLineStyle('curved');
-    diagram.arrangeAllLines();                     // keeps hand-placed lines; Ctrl+Z undoes it
-    return;
-  }
-  if (item.dataset.dir) {
-    layoutOpts.dir = item.dataset.dir;
-    localStorage.setItem('dbdiga-dir', layoutOpts.dir);
-  }
-  if (item.dataset.spacing) {
-    layoutOpts.spacing = item.dataset.spacing;
-    localStorage.setItem('dbdiga-spacing', layoutOpts.spacing);
-  }
-  syncMenu();
 });
 document.addEventListener('click', () => { arrangeMenu.hidden = true; });
 
@@ -1046,7 +1044,7 @@ fileInput.addEventListener('change', () => {
         const name = file.name.replace(/\.json$/i, '').replace(/\.sqltoerdiagrams$/i, '') || 'Untitled diagram';
         newDoc(name, {
           sql: data.sql, dialect: data.dialect, format: data.format,
-          layout: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths },
+          layout: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths, lineSpacing: data.lineSpacing },
         });
         fileInput.value = '';
         return;
@@ -1055,7 +1053,7 @@ fileInput.addEventListener('change', () => {
       localStorage.setItem('dbdiga-sql', data.sql);
       if (data.dialect && DIALECTS[data.dialect]) { dialect = data.dialect; localStorage.setItem('dbdiga-dialect', dialect); syncDialect(); }
       firstRender = true;          // ensure a clean restore even if a model exists
-      rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths } });
+      rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths, lineSpacing: data.lineSpacing } });
       saveLayout();
     } catch (err) {
       statusEl.textContent = 'Invalid project file';
@@ -1339,7 +1337,7 @@ if (isEmbed) {
       // a shared schema with no saved positions (e.g. gallery links) → auto-arrange
       const hasPositions = data.positions && Object.keys(data.positions).length > 0;
       if (hasPositions) {
-        rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths } });
+        rebuild({ restore: { positions: data.positions, camera: data.camera, annotations: data.annotations, hidden: data.hidden, manualLinks: data.manualLinks, edgeBends: data.edgeBends, edgeAnchors: data.edgeAnchors, edgePaths: data.edgePaths, lineSpacing: data.lineSpacing } });
       } else {
         rebuild({ arrange: true });
       }

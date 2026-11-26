@@ -30,9 +30,14 @@ must be running and open before any tool except `diagram_status` will work.
    - `diagram_auto_arrange` (`direction` `LR`/`TB`, `spacing`) for a plain graph layout.
    - `diagram_organize_groups` to put tables in labelled boxes by domain. List
      every table in a group, or set `ungrouped` to `group` / `hide` / `leave`.
-     Add `optimize_lines: true` to shorten relation lines.
-3. **Tidy lines**: `diagram_arrange_lines_straight` for right-angle lines, or
-   `diagram_arrange_lines` for curved ones. Run this after moving tables.
+     Add `optimize_lines: true` to shorten relation lines. Tables inside each
+     box are ordered so lines cross as little as possible (`order_tables`,
+     on by default).
+3. **Tidy lines**: `diagram_arrange_lines_straight` for right-angle lines. Run
+   this after moving tables.
+   Straight lines take `line_gap` (space between parallel lines),
+   `group_margin` (space from group box edges, default 24) and `table_margin`
+   (space around tables, default 16).
 4. **Check**: `diagram_screenshot` and look at the image. Pass `tables` to zoom
    into one area. Fix what looks wrong, then screenshot again.
 5. **Show the user**: `diagram_view` with `fit: true` or `center_table`.

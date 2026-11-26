@@ -232,7 +232,7 @@ const TOOLS = [
   },
   {
     name: 'diagram_organize_groups',
-    description: 'Organize tables into labelled group boxes, for example by business domain. Tables are packed inside each box with the most connected first; boxes follow the order given, left to right then down. Replaces existing group boxes and keeps sticky notes.',
+    description: 'Organize tables into labelled group boxes, for example by business domain. Tables are packed inside each box, ordered so relation lines (including lines to other boxes) cross as little as possible; boxes follow the order given, left to right then down. Replaces existing group boxes and keeps sticky notes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -278,22 +278,39 @@ const TOOLS = [
           default: false,
           description: 'With keep_arrangement: size each box so its name stays clear of the tables and is not cut off at minimum zoom.',
         },
+        order_tables: {
+          type: 'boolean',
+          default: true,
+          description: 'Order the tables inside each box so relation lines cross as little as possible (judged on centre-to-centre lines, lines to tables in other boxes included; shorter lines break ties). Reports table_order_crossings before and after. Ignored with keep_arrangement. false: most connected first.',
+        },
       },
       required: ['groups'],
     },
     handler: async (args) => asText(await send('organize', args)),
   },
   {
-    name: 'diagram_arrange_lines',
-    description: 'Arrange the relation lines: choose each line\'s sides, entry points and bend so lines avoid other tables, cross less and never share an entry point. Lines placed or bent by hand keep that. Same as Arrange > Arrange lines in the app.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => asText(await send('arrange_lines')),
-  },
-  {
     name: 'diagram_arrange_lines_straight',
-    description: 'Arrange the relation lines as straight horizontal and vertical segments that go around tables, never share a segment or an entry point, and jump where they cross. Same as Arrange > Arrange lines straight in the app.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => asText(await send('arrange_lines_straight')),
+    description: 'Arrange the relation lines as straight horizontal and vertical segments that go around tables, never share a segment or an entry point, and jump where they cross. A foreign key from a table to itself is drawn as a small loop at the table top corner on the side with fewer lines. Same as Arrange > Arrange lines straight in the app. Spacing values given here are kept for later re-routing in this session (pass null to go back to the default).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        line_gap: {
+          type: ['number', 'null'],
+          description: 'Space between parallel lines where there is room, 0 to 300. Default: a third of the usual space between tables, at least 24.',
+        },
+        group_margin: {
+          type: ['number', 'null'],
+          default: 24,
+          description: 'Lines keep this far from group box edges they run along (crossing an edge straight across is fine), 0 to 300.',
+        },
+        table_margin: {
+          type: ['number', 'null'],
+          default: 16,
+          description: 'Space kept free around every table, 8 to 200.',
+        },
+      },
+    },
+    handler: async (args) => asText(await send('arrange_lines_straight', args)),
   },
   {
     name: 'diagram_move_tables',

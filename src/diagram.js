@@ -7,7 +7,6 @@ import { relationCardinality } from './cardinality.js';
 import { columnLines, countColumns } from './columns.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
 import { routeEdges, edgeMidpoint, anchorForPoint } from './edge-routing.js';
-import { arrangeLines } from './line-arranger.js';
 import { countCrossings, pathStillFits, pathJumps, pathMidpoint, pathDistance, JUMP_RADIUS, elbowPath, pathUnderTables, separateOverlaps, routeMoved, moveSegment, nearestSegment, followMove, sideFacesAway } from './orthogonal-router.js';
 
 const GROUP_LABEL_FAMILY = 'ui-sans-serif, system-ui, sans-serif';
@@ -62,6 +61,7 @@ export class Diagram {
     this.segDrag = null;           // a straight line's segment being dragged {id, index, savedPath, moved}
     this.edgePaths = {};           // line id -> straight path {points, fromSide, toSide}
     this._straightRun = 0;         // the latest straight routing; older results are dropped
+    this.lineSpacing = {};         // straight lines: { lineGap, groupMargin, clearance } (px); missing ones use the router's defaults
     this._live = null;             // background routing while tables are dragged
     this._livePaths = null;        // its latest routes, for the dragged tables' lines
     this.highlightedRoutes = [];   // lines emphasised on the last draw
@@ -787,8 +787,8 @@ export class Diagram {
     }
     // While tables are being dragged, their lines let go of their entry points
     // and bends, so each line follows the table and enters from the side that
-    // faces the other table. In straight mode, entry points left over from the
-    // curved "Arrange lines" don't apply at all.
+    // faces the other table. In straight mode, entry points left over from
+    // arranged curves (saved by earlier versions) don't apply at all.
     let anchors = this.edgeAnchors, bends = this.edgeBends, looseIds = null;
     if (this.isStraightMode()) {
       anchors = {};
@@ -816,14 +816,16 @@ export class Diagram {
     // a straight path from "Arrange lines straight" replaces the curve while it
     // still fits its tables. In straight mode a line without one (its table is
     // being moved, or it waits to be re-routed) is drawn as a simple right angle.
+    // A table's line to itself is always a small loop at a top corner.
     const straightMode = this.isStraightMode();
     const chosen = [];
     for (const seg of routes) {
       // lines of a table being dragged use the routes found while dragging
       let path = looseIds?.has(seg.id) ? (followed[seg.id] ?? this._livePaths?.[seg.id] ?? null) : this.edgePaths[seg.id];
       if (!path || !pathStillFits(path, byKey.get(seg.fromKey), byKey.get(seg.toKey))) {
-        if (!straightMode) continue;
-        path = elbowPath(seg);
+        if (seg.loop) path = seg.loop;
+        else if (!straightMode) continue;
+        else path = elbowPath(seg);
       }
       chosen.push({ seg, path });
     }
@@ -861,8 +863,18 @@ export class Diagram {
     this.markDirty();
   }
 
-  // Lines are drawn straight once "Arrange lines straight" has run, until
-  // "Arrange lines" turns them back into curves.
+  // Spacing for straight lines ({ lineGap, groupMargin, clearance }, px), as
+  // saved with the diagram. Anything missing or not a number uses the default.
+  setLineSpacing(spacing) {
+    const next = {};
+    for (const k of ['lineGap', 'groupMargin', 'clearance']) {
+      const v = spacing?.[k];
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) next[k] = v;
+    }
+    this.lineSpacing = next;
+  }
+
+  // Lines are drawn straight once "Arrange lines straight" has run.
   isStraightMode() {
     for (const _ in this.edgePaths) return true;
     return false;
@@ -899,7 +911,7 @@ export class Diagram {
       const worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
       worker.onmessage = (event) => { if (event.data.partial) return; worker.terminate(); resolve(event.data); };
       worker.onerror = (err) => { worker.terminate(); reject(err); };
-      worker.postMessage({ groups: this._straightInput().groups, ...message, hidden: [...this.hidden] });
+      worker.postMessage({ groups: this._straightInput().groups, ...this.lineSpacing, ...message, hidden: [...this.hidden] });
     });
   }
 
@@ -907,7 +919,17 @@ export class Diagram {
   // segments around the tables (in a background worker), then show them.
   // `auto`: done by the app on its own (straight is the default line style), so
   // the result joins the previous undo step instead of making its own.
-  async arrangeLinesStraight({ auto = false } = {}) {
+  // `spacing`: { lineGap, groupMargin, clearance } in px, kept for later
+  // routing too (moving a table re-routes its lines); null goes back to the default.
+  async arrangeLinesStraight({ auto = false, spacing = null } = {}) {
+    if (spacing) {
+      const next = { ...this.lineSpacing };
+      for (const [k, v] of Object.entries(spacing)) {
+        if (v === null) delete next[k];
+        else if (Number.isFinite(v)) next[k] = v;
+      }
+      this.lineSpacing = next;
+    }
     const { tables, edges, anchors } = this._straightInput();
     // lines the user shaped by hand stay, while they still fit their tables
     const byKey = new Map(tables.map((t) => [t.key, t]));
@@ -921,8 +943,8 @@ export class Diagram {
     const { paths, failed, overlapping, ms } = await this._runStraightWorker({ tables, edges: todo, anchors, keep, tidy: true });
     if (run === this._straightRun) {
       this.edgePaths = { ...keep, ...paths };
-      // entry points and bends from the curved "Arrange lines" don't apply to
-      // straight lines; ones placed by hand are kept
+      // entry points and bends from arranged curves don't apply to straight
+      // lines; ones placed by hand are kept
       const hand = {};
       for (const [id, ends] of Object.entries(this.edgeAnchors)) { const h = handEnds(ends); if (h) hand[id] = h; }
       this.edgeAnchors = hand;
@@ -988,7 +1010,7 @@ export class Diagram {
     const input = this._liveInput();
     if (!input) return;
     const started = performance.now();
-    const { paths } = routeMoved(input.todo, input.byKey, { anchors: input.anchors, keep: input.keep, groups: input.groups, isHidden: (k) => this.hidden.has(k) });
+    const { paths } = routeMoved(input.todo, input.byKey, { ...this.lineSpacing, anchors: input.anchors, keep: input.keep, groups: input.groups, isHidden: (k) => this.hidden.has(k) });
     if (this._live) this._live.slowMs = performance.now() - started;
     this._livePaths = { ...input.followed, ...paths };
     this.markDirty();
@@ -1011,7 +1033,7 @@ export class Diagram {
       if (live.pending) this._liveRouteInWorker();
     };
     live.worker.onerror = (err) => { live.busy = false; console.error('live routing failed', err); };
-    live.worker.postMessage({ tables: input.tables, edges: input.todo, anchors: input.anchors, keep: input.keep, groups: input.groups, moved: true, hidden: [...this.hidden] });
+    live.worker.postMessage({ ...this.lineSpacing, tables: input.tables, edges: input.todo, anchors: input.anchors, keep: input.keep, groups: input.groups, moved: true, hidden: [...this.hidden] });
   }
 
   _stopLiveRoute() {
@@ -1022,7 +1044,7 @@ export class Diagram {
   }
 
   // After tables were moved: their lines choose their sides again. Straight
-  // lines are re-routed; arranged curved lines are re-arranged.
+  // lines are re-routed; curved lines follow their tables.
   _linesAfterMove(keys, livePaths = null) {
     if (!keys.size) return;
     // what the user placed by hand, worked out from the lines as they were
@@ -1050,7 +1072,6 @@ export class Diagram {
       else if (this.edgePaths[id]?.hand) { delete this.edgePaths[id]; settled.delete(id); }
     }
     if (this.isStraightMode()) this.rerouteStraight(keys, settled);
-    else this._rearrangeLinesOf(keys);
   }
 
   // What the user placed by hand on the lines of moved tables, and still
@@ -1097,29 +1118,6 @@ export class Diagram {
       if (keys.has(l.from.table) || keys.has(l.to.table)) ids.push(`${l.from.table}.${l.from.col}>${l.to.table}.${l.to.col}`);
     }
     return ids;
-  }
-
-  // Curved mode: re-arrange only the lines of the moved tables, around every
-  // other line's entry points. Nothing to do if "Arrange lines" was never used
-  // (unarranged lines already follow their tables).
-  _rearrangeLinesOf(keys) {
-    const arranged = Object.values(this.edgeAnchors).some((a) => a.from?.arranged || a.to?.arranged);
-    if (!arranged) return;
-    const byKey = this._tableMap();
-    const edges = [];
-    for (const r of this.model.relations) {
-      edges.push({ fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(), fromCol: r.fromCols[0], toCol: r.toCols[0] });
-    }
-    for (const l of this.manualLinks) edges.push({ fromKey: l.from.table, toKey: l.to.table, fromCol: l.from.col, toCol: l.to.col });
-    // the moved tables' lines only have their ends and bends placed by hand
-    // left (automatic ones were released), and those stay
-    const anchors = {}, keepAnchors = {};
-    for (const [id, ends] of Object.entries(this.edgeAnchors)) { anchors[id] = ends; keepAnchors[id] = ends; }
-    const bends = { ...this.edgeBends };
-    const result = arrangeLines(edges, byKey, { keepAnchors, keepBends: bends, isHidden: (k) => this.hidden.has(k) });
-    this.edgeAnchors = { ...anchors, ...result.anchors };
-    this.edgeBends = { ...bends, ...result.bends };
-    this.markDirty();
   }
 
   // After a table, group or line end moves in straight mode: re-route the
@@ -1256,38 +1254,6 @@ export class Diagram {
       this.edgeBends[id] = bend.arranged ? { x: bend.x, y: bend.y, arranged: true } : { x: bend.x, y: bend.y };
     }
     this.markDirty();
-  }
-
-  // Arrange lines: choose every line's sides, entry points and bend so lines
-  // avoid tables and each other. Lines the user placed or bent by hand keep
-  // that; lines from an earlier arrange are arranged again.
-  arrangeAllLines() {
-    const byKey = this._tableMap();
-    const edges = [];
-    for (const r of this.model.relations) {
-      edges.push({ fromKey: r.fromTable.toLowerCase(), toKey: r.toTable.toLowerCase(), fromCol: r.fromCols[0], toCol: r.toCols[0] });
-    }
-    for (const l of this.manualLinks) {
-      edges.push({ fromKey: l.from.table, toKey: l.to.table, fromCol: l.from.col, toCol: l.to.col });
-    }
-    // keep only what the user placed by hand, end by end
-    const keepAnchors = {};
-    for (const [id, ends] of Object.entries(this.edgeAnchors)) {
-      const hand = {};
-      if (ends.from && !ends.from.arranged) hand.from = ends.from;
-      if (ends.to && !ends.to.arranged) hand.to = ends.to;
-      if (hand.from || hand.to) keepAnchors[id] = hand;
-    }
-    const keepBends = Object.fromEntries(Object.entries(this.edgeBends).filter(([, b]) => !b.arranged));
-    const result = arrangeLines(edges, byKey, { keepAnchors, keepBends, isHidden: (k) => this.hidden.has(k) });
-    this.edgeAnchors = { ...result.anchors, ...keepAnchors };
-    this.edgeBends = { ...result.bends, ...keepBends };
-    this.edgePaths = {};                           // curved lines replace straight ones
-    this._straightRun++;
-    this.pinnedEdge = null;
-    this.markDirty();
-    this.onLayoutChange?.();
-    return { arranged: result.arranged, keptByHand: Object.keys(keepAnchors).length };
   }
 
   // Brings a search result into view: centres on the table (or the column's row),
@@ -2670,7 +2636,7 @@ function wrapText(ctx, text, maxW) {
   return out;
 }
 
-// The ends of a line the user placed by hand (not by "Arrange lines"), or null.
+// The ends of a line the user placed by hand (not arranged automatically), or null.
 function handEnds(ends) {
   if (!ends) return null;
   const hand = {};

@@ -4,6 +4,7 @@
 // so they don't cross each other as they leave the table. A user can also pin
 // either end of a line to a chosen point on its table's edge.
 import { columnY } from './renderer.js';
+import { selfLoopPaths } from './self-loop.js';
 
 const MIN_BEND = 28;
 const BEND_RATIO = 0.4;
@@ -132,18 +133,6 @@ function avoidPinnedEnds(autoEnds, pinnedEnds) {
   }
 }
 
-// The curve between two end points ({x, y, side}), with an optional bend.
-export function curveBetween(fromEnd, toEnd, bend = null) {
-  const c1 = controlPoint(fromEnd, toEnd);
-  const c2 = controlPoint(toEnd, fromEnd);
-  return applyBend({
-    fx: fromEnd.x, fy: fromEnd.y, tx: toEnd.x, ty: toEnd.y,
-    c1x: c1.x, c1y: c1.y, c2x: c2.x, c2y: c2.y,
-  }, bend);
-}
-
-export { anchorPoint, isVerticalSide, OUTWARD };
-
 // Each curve leaves its table straight out from the side it is attached to.
 function controlPoint(end, otherEnd) {
   const [dx, dy] = OUTWARD[end.side];
@@ -181,9 +170,12 @@ export function edgeMidpoint(seg) {
 // their curve added: fx, fy, c1x, c1y, c2x, c2y, tx, ty, plus id, each end's
 // side and the direction it leaves its table. bends maps a line's id to its
 // {x, y} offset; anchors maps it to { from?, to? } points of the form { side, t }.
+// A table's line to itself also gets `loop`: the small right-angle loop at a
+// top corner it is drawn as (self-loop.js); other ends keep clear of its ends.
 export function routeEdges(edges, byKey, isHidden = () => false, bends = {}, anchors = {}) {
   const routes = [];
   const autoEnds = [];
+  const loops = new Map();     // table -> its lines to itself
 
   for (const edge of edges) {
     const from = byKey.get(edge.fromKey);
@@ -194,6 +186,12 @@ export function routeEdges(edges, byKey, isHidden = () => false, bends = {}, anc
     const axis = axisBetween(from, to);
     const sides = sidesFor(axis, from, to);
     const id = `${edge.fromKey}.${edge.fromCol}>${edge.toKey}.${edge.toCol}`;
+    if (from === to) {
+      const entry = { route: { ...edge, axis, id }, fromEnd: null, toEnd: null };
+      loops.set(from, [...(loops.get(from) || []), entry]);
+      routes.push(entry);
+      continue;
+    }
     const makeEnd = (table, other, side, column, anchor) => {
       if (validAnchor(anchor)) return { table, other, side: anchor.side, ...anchorPoint(table, anchor), pinned: true };
       const end = { table, other, side, column, pinned: false };
@@ -207,8 +205,23 @@ export function routeEdges(edges, byKey, isHidden = () => false, bends = {}, anc
     });
   }
 
+  // each loop takes the top corner on the side with fewer of its table's lines
+  const loopEnds = [];
+  for (const [table, entries] of loops) {
+    const ends = routes.flatMap(({ fromEnd, toEnd }) => [fromEnd, toEnd]).filter((e) => e?.table === table);
+    const paths = selfLoopPaths(table, entries.map((e) => e.route.id), ends);
+    for (const entry of entries) {
+      const loop = paths[entry.route.id];
+      const [first, last] = [loop.points[0], loop.points[loop.points.length - 1]];
+      entry.route.loop = loop;
+      entry.fromEnd = { table, other: table, side: loop.fromSide, x: first[0], y: first[1], pinned: false };
+      entry.toEnd = { table, other: table, side: loop.toSide, x: last[0], y: last[1], pinned: false };
+      loopEnds.push(entry.fromEnd, entry.toEnd);
+    }
+  }
+
   assignPorts(autoEnds);
-  avoidPinnedEnds(autoEnds, routes.flatMap(({ fromEnd, toEnd }) => [fromEnd, toEnd]).filter((e) => e.pinned));
+  avoidPinnedEnds(autoEnds, [...routes.flatMap(({ fromEnd, toEnd }) => [fromEnd, toEnd]).filter((e) => e.pinned), ...loopEnds]);
 
   return routes.map(({ route, fromEnd, toEnd }) => {
     const c1 = controlPoint(fromEnd, toEnd);

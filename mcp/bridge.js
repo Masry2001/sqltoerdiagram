@@ -4,6 +4,7 @@
 // its file input.
 import { layout } from '/src/layout.js';
 import { countColumns } from '/src/columns.js';
+import { packGroup, segmentsCross, orderTablesInGroups } from '/src/group-layout.js';
 
 const BRIDGE_URL = 'http://127.0.0.1:5199';
 const GROUP_COLORS = ['blue', 'green', 'amber', 'purple'];
@@ -75,6 +76,7 @@ function currentProject() {
     edgeBends: { ...d.edgeBends },
     edgeAnchors: { ...d.edgeAnchors },
     edgePaths: { ...d.edgePaths },
+    lineSpacing: { ...d.lineSpacing },
   };
 }
 
@@ -120,25 +122,6 @@ function degrees() {
     bump(l.to.table);
   }
   return count;
-}
-
-// Packs tables into columns, each new table going to the shortest column.
-function packGroup(tables, gap) {
-  const columnWidth = Math.max(...tables.map((t) => t.w));
-  const area = tables.reduce((sum, t) => sum + (columnWidth + gap) * (t.h + gap), 0);
-  const count = Math.max(1, Math.min(tables.length, Math.round(Math.sqrt(area * 1.6) / (columnWidth + gap))));
-  const heights = new Array(count).fill(0);
-  const placed = [];
-  for (const t of tables) {
-    const column = heights.indexOf(Math.min(...heights));
-    placed.push({ table: t, x: column * (columnWidth + gap), y: heights[column] });
-    heights[column] += t.h + gap;
-  }
-  return {
-    placed,
-    w: count * columnWidth + (count - 1) * gap,
-    h: Math.max(...heights) - gap,
-  };
 }
 
 // ---- line-aware arrangement ----
@@ -198,13 +181,12 @@ function lineStats() {
     if (frames.some((f) => f !== fa && f !== fb && segmentHitsRect(ax, ay, bx, by, f))) overOtherGroups++;
   }
   // centre-to-centre lines that cross (lines sharing a table don't count)
-  const turn = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
   let crossings = 0;
   for (let i = 0; i < segments.length; i++) {
     for (let j = i + 1; j < segments.length; j++) {
       const s = segments[i], t = segments[j];
       if (s.a === t.a || s.a === t.b || s.b === t.a || s.b === t.b) continue;
-      if (turn(s.p, s.q, t.p) * turn(s.p, s.q, t.q) < 0 && turn(t.p, t.q, s.p) * turn(t.p, t.q, s.q) < 0) crossings++;
+      if (segmentsCross(s.p, s.q, t.p, t.q)) crossings++;
     }
   }
   return { lines: lines.length, between_groups: betweenGroups, total_length: Math.round(length), lines_over_other_groups: overOtherGroups, straight_line_crossings: crossings };
@@ -246,8 +228,10 @@ function anneal(items, cost, iterations, random) {
 }
 
 // Chooses box order and the table order inside each box to shorten the lines.
-// Rows are centred so the busiest boxes can sit in the middle.
-function optimizeBoxes(boxes, { gap, padding, header, groupGap, keepOnEdge }) {
+// Rows are centred so the busiest boxes can sit in the middle. With
+// orderTables, the table order inside each box is then tuned for the fewest
+// crossings (orderTablesInGroups); returns its { before, after } crossings.
+function optimizeBoxes(boxes, { gap, padding, header, groupGap, keepOnEdge, orderTables }) {
   const random = seededRandom(20261110);
   const boxOf = new Map();
   boxes.forEach((box) => box.tables.forEach((t) => boxOf.set(t.key, box)));
@@ -307,11 +291,9 @@ function optimizeBoxes(boxes, { gap, padding, header, groupGap, keepOnEdge }) {
     const o = offsets.get(key);
     return [box.x + o[0], box.y + o[1]];
   };
-  const turn = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
   const cross = (l, m) => {
     if (l[0] === m[0] || l[0] === m[1] || l[1] === m[0] || l[1] === m[1]) return false;   // they share a table
-    const [p1, p2, p3, p4] = [centre(l[0]), centre(l[1]), centre(m[0]), centre(m[1])];
-    return turn(p1, p2, p3) * turn(p1, p2, p4) < 0 && turn(p3, p4, p1) * turn(p3, p4, p2) < 0;
+    return segmentsCross(centre(l[0]), centre(l[1]), centre(m[0]), centre(m[1]));
   };
   const lineCost = (subset = lines) => {
     let total = 0;
@@ -378,6 +360,8 @@ function optimizeBoxes(boxes, { gap, padding, header, groupGap, keepOnEdge }) {
     arrangement = arrangeBoxes();
   }
   place(arrangement.order, arrangement.width);
+  if (!orderTables) return null;
+  return orderTablesInGroups(boxes, lines, { gap, padding, header, place: () => place(arrangement.order, arrangement.width) });
 }
 
 // Re-spaces tables and boxes while keeping the current columns, table order
@@ -449,6 +433,7 @@ function organize({
   table_gap = 36,
   group_gap = null,
   label_space = false,
+  order_tables = true,
 }) {
   const d = diagram();
   const GAP = Math.max(16, Math.min(300, table_gap));
@@ -491,6 +476,7 @@ function organize({
     const pack = packGroup(ordered, GAP);
     return {
       ...group,
+      order: ordered,
       color: GROUP_COLORS.includes(group.color) || /^#[0-9a-f]{6}$/i.test(group.color ?? '')
         ? group.color
         : GROUP_COLORS[index % GROUP_COLORS.length],
@@ -502,32 +488,44 @@ function organize({
   if (!boxes.length) throw new Error('None of the listed tables are visible in the diagram.');
   if (ungrouped === 'hide' && rest.length) d.setTablesHidden(rest.map((t) => t.key), true);
 
+  // Table order inside the boxes: the fewest line crossings (centre to centre,
+  // lines to other boxes included), unless the arrangement is kept.
+  let tableOrder = null;
   if (keep_arrangement) {
     respaceBoxes(boxes, { gap: GAP, padding: PADDING, header: HEADER, groupGap: GROUP_GAP, labelSpace: label_space });
   } else if (optimize_lines) {
-    optimizeBoxes(boxes, {
+    tableOrder = optimizeBoxes(boxes, {
       gap: GAP,
       padding: PADDING,
       header: HEADER,
       groupGap: GROUP_GAP,
       keepOnEdge: new Set(keep_on_edge),
+      orderTables: order_tables,
     });
   } else {
     const totalArea = boxes.reduce((sum, b) => sum + (b.w + GROUP_GAP) * (b.h + GROUP_GAP), 0);
     const rowWidth = Math.max(Math.sqrt(totalArea * 1.6), ...boxes.map((b) => b.w));
-    let x = 0;
-    let y = 0;
-    let rowHeight = 0;
-    for (const box of boxes) {
-      if (x > 0 && x + box.w > rowWidth) {
-        x = 0;
-        y += rowHeight + GROUP_GAP;
-        rowHeight = 0;
+    // boxes in the order given, left to right then down (again when a box
+    // changes height as its tables are reordered)
+    const placeRows = () => {
+      let x = 0;
+      let y = 0;
+      let rowHeight = 0;
+      for (const box of boxes) {
+        if (x > 0 && x + box.w > rowWidth) {
+          x = 0;
+          y += rowHeight + GROUP_GAP;
+          rowHeight = 0;
+        }
+        box.x = x;
+        box.y = y;
+        x += box.w + GROUP_GAP;
+        rowHeight = Math.max(rowHeight, box.h);
       }
-      box.x = x;
-      box.y = y;
-      x += box.w + GROUP_GAP;
-      rowHeight = Math.max(rowHeight, box.h);
+    };
+    placeRows();
+    if (order_tables) {
+      tableOrder = orderTablesInGroups(boxes, lineList(), { gap: GAP, padding: PADDING, header: HEADER, place: placeRows });
     }
   }
 
@@ -547,6 +545,7 @@ function organize({
     groups: boxes.map((b) => ({ name: b.name, tables: b.tables.length })),
     unknown_tables: unknown,
     listed_twice: duplicates,
+    ...(tableOrder ? { table_order_crossings: { before: tableOrder.before, after: tableOrder.after } } : {}),
     ...(showStats ? { line_stats_before: statsBefore, line_stats_after: lineStats() } : {}),
     ...summary(),
   };
@@ -702,6 +701,7 @@ function projectContent(project) {
     layout: {
       positions: project.positions, camera: project.camera, annotations: project.annotations, hidden: project.hidden,
       manualLinks: project.manualLinks, edgeBends: project.edgeBends, edgeAnchors: project.edgeAnchors, edgePaths: project.edgePaths,
+      lineSpacing: project.lineSpacing,
     },
   };
 }
@@ -725,7 +725,7 @@ const OPS = {
   load: ({ project, diagram: expected }) => { expectOpen(expected); return loadProject(project); },
   load_sql: ({ sql, dialect, diagram: expected }) => {
     expectOpen(expected);
-    const { positions, annotations, hidden, manualLinks, edgeBends, edgeAnchors, edgePaths } = currentProject();
+    const { positions, annotations, hidden, manualLinks, edgeBends, edgeAnchors, edgePaths, lineSpacing } = currentProject();
     return loadProject({
       app: 'dbdiga',
       version: 1,
@@ -738,6 +738,7 @@ const OPS = {
       edgeBends,
       edgeAnchors,
       edgePaths,
+      lineSpacing,
     });
   },
   auto_arrange: ({ direction = 'LR', spacing = 'comfortable' }) => {
@@ -748,8 +749,14 @@ const OPS = {
     return summary();
   },
   organize,
-  arrange_lines: () => ({ ...diagram().arrangeAllLines(), ...summary() }),
-  arrange_lines_straight: async () => ({ ...(await diagram().arrangeLinesStraight()), ...summary() }),
+  arrange_lines_straight: async ({ line_gap, group_margin, table_margin } = {}) => {
+    // spacing (px) given here is kept for later routing too; null goes back to the default
+    const clamp = (v, lo, hi) => (v == null ? v : Math.max(lo, Math.min(hi, +v)));
+    const spacing = { lineGap: clamp(line_gap, 0, 300), groupMargin: clamp(group_margin, 0, 300), clearance: clamp(table_margin, 8, 200) };
+    const d = diagram();
+    const result = await d.arrangeLinesStraight({ spacing });
+    return { ...result, spacing: { ...d.lineSpacing }, ...summary() };
+  },
   move: ({ positions }) => {
     const known = tableMap();
     const unknown = [];

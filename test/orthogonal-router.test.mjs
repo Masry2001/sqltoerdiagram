@@ -1,4 +1,5 @@
 // Tests for "Arrange lines straight". Run: node test/orthogonal-router.test.mjs
+import { spreadParallel, lineGapFor, MIN_LINE_GAP } from '../src/orthogonal-router.js';
 import { routeStraight, routeStraightTidy, arrivalOrder, countCrossings, pathJumps, pathFits, pathMidpoint, pathDistance, elbowPath, pathUnderTables, pathStillFits, separateOverlaps, moveSegment, nearestSegment, followMove, sideFacesAway } from '../src/orthogonal-router.js';
 
 let pass = 0, fail = 0;
@@ -254,6 +255,31 @@ function throughTable(paths, map) {
   ok(countCrossings(plus) === 1, 'a horizontal and a vertical line crossing count once');
   ok(countCrossings([{ points: [[0, 0], [100, 0]] }, { points: [[100, 0], [100, 100]] }]) === 0, 'lines that only meet at an end do not cross');
   ok(countCrossings([{ points: [[0, 50], [100, 50], [100, 0], [20, 0], [20, 100]] }]) === 0, 'a line never crosses itself');
+}
+
+// spacing: parallel lines keep a gap, and lines keep off group box edges
+{
+  ok(lineGapFor([]) === MIN_LINE_GAP, 'parallel lines keep at least the minimum gap by default');
+  ok(lineGapFor([], 40) === 40 && lineGapFor([], 0) === 0, 'a given line gap is used as it is');
+  // two lines side by side, 16 apart, with room around them
+  const twin = (y) => ({ points: [[0, 0], [0, 200], [400, 200], [400, 400]].map(([x, yy]) => [x, yy === 200 ? y : yy]), fromSide: 'bottom', toSide: 'top' });
+  const spread = spreadParallel({ a: twin(192), b: twin(208) }, { gap: 48 });
+  const dy = Math.abs(spread.a.points[1][1] - spread.b.points[1][1]);
+  ok(dy >= 47, 'parallel lines move apart to the line gap');
+  // a line running along a group box edge moves off it
+  const along = { a: { points: [[0, 0], [0, 200], [400, 200], [400, 400]], fromSide: 'bottom', toSide: 'top' } };
+  const group = { x: 100, y: 196, w: 200, h: 300 };
+  const off = spreadParallel(along, { gap: 0, groups: [group], groupMargin: 32 });
+  ok(Math.abs(off.a.points[1][1] - group.y) >= 31, 'a line along a group edge keeps the group margin');
+  const kept = spreadParallel(along, { gap: 0, groups: [group], groupMargin: 0 });
+  ok(kept.a.points[1][1] === 200, 'no group margin: the line stays');
+  // routing: a line passing a group keeps off its edge
+  const map = byKey(table('a', 0, 0, 200, 100), table('b', 1000, 0, 200, 100), table('g1', 400, 140, 200, 100));
+  const box = { x: 360, y: 40, w: 280, h: 240 };
+  const passing = (groupMargin) => segments(routeStraightTidy([edge('a', 'b')], map, { groups: [box], groupMargin }).paths)
+    .filter(({ a, b }) => a[1] === b[1] && Math.max(a[0], b[0]) > box.x && Math.min(a[0], b[0]) < box.x + box.w);
+  ok(passing(0).some(({ a }) => Math.abs(a[1] - box.y) < 31), 'without a group margin the line hugs the group edge');
+  ok(passing(32).every(({ a }) => Math.abs(a[1] - box.y) >= 31 && Math.abs(a[1] - (box.y + box.h)) >= 31), 'a routed line runs no closer to a group edge than the margin');
 }
 
 console.log(`orthogonal router: ${pass} passed, ${fail} failed`);
