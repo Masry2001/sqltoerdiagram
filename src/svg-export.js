@@ -1,6 +1,6 @@
 // Build a standalone SVG string of the current diagram (vector, theme-aware).
 import { THEMES, columnY, ROW_H, HEADER_H } from './renderer.js';
-import { NOTE_COLORS, groupColor } from './annotations.js';
+import { NOTE_COLORS, groupColor, NOTE_FONT, NOTE_PAD, noteTextLayout } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
 import { routeEdges } from './edge-routing.js';
 import { pathStillFits, elbowPath, pathJumps, JUMP_RADIUS, separateOverlaps } from './orthogonal-router.js';
@@ -161,11 +161,11 @@ export function exportSVG(model, themeName, annotations = [], hidden = null, edg
     const c = NOTE_COLORS[a.color] || NOTE_COLORS.yellow;
     parts.push(`<rect x="${a.x}" y="${a.y}" width="${a.w}" height="${a.h}" rx="8" fill="${c.fill}"/>`);
     if (a.text) {
-      const pad = 10, lh = 17, maxChars = Math.max(4, Math.floor((a.w - pad * 2) / 7));
-      const lines = wrap(a.text, maxChars);
-      const tspans = lines.map((ln, i) =>
-        `<tspan x="${a.x + pad}" y="${a.y + pad + 12 + i * lh}">${esc(ln)}</tspan>`).join('');
-      parts.push(`<text font-size="13" fill="${c.text}">${tspans}</text>`);
+      // laid out as on the canvas (world units; lines past the bottom are cut)
+      const maxChars = Math.max(4, Math.floor((a.w - NOTE_PAD * 2) / 7));
+      const lines = noteTextLayout(a, wrap(a.text, maxChars).map((text) => ({ text, w: text.length * 7 })));
+      const tspans = lines.map((ln) => `<tspan x="${ln.x}" y="${ln.y + NOTE_FONT - 1}">${esc(ln.text)}</tspan>`).join('');
+      parts.push(`<text font-size="${NOTE_FONT}" fill="${c.text}">${tspans}</text>`);
     }
   }
 

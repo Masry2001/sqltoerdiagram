@@ -2,7 +2,7 @@
 // the render loop, edge routing and export. Renders only when dirty and only
 // what is on screen.
 import { THEMES, rasterizeTable, columnY, measureTable, ROW_H, HEADER_H } from './renderer.js';
-import { NOTE_COLORS, GROUP_COLORS, NOTE_ORDER, GROUP_ORDER, makeAnnotation, groupColor, isHexColor } from './annotations.js';
+import { NOTE_COLORS, GROUP_COLORS, NOTE_ORDER, GROUP_ORDER, makeAnnotation, groupColor, isHexColor, NOTE_FONT, NOTE_LINE, NOTE_PAD, NOTE_FONT_CSS, noteTextLayout, noteTextAsBars } from './annotations.js';
 import { relationCardinality } from './cardinality.js';
 import { columnLines, countColumns } from './columns.js';
 import { inferLinks as inferLinksCore } from './infer-links.js';
@@ -462,20 +462,37 @@ export class Diagram {
     roundRectPath(ctx, a.x, a.y, a.w, a.h, 8);
     ctx.clip();
     ctx.fillStyle = c.text;
-    ctx.font = `${13 / cam.scale}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.font = NOTE_FONT_CSS;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
-    const pad = 10 / cam.scale;
-    const lh = 17 / cam.scale;
     const text = a.text || 'Double-click to edit';
     if (!a.text) ctx.globalAlpha = 0.5;
-    let y = a.y + pad;
-    for (const line of wrapText(ctx, text, a.w - pad * 2)) {
-      ctx.fillText(line, a.x + pad, y);
-      y += lh;
-      if (y > a.y + a.h - pad) break;
+    // too small to read: each line becomes a faint bar, which is much faster
+    const bars = noteTextAsBars(cam.scale);
+    if (bars) ctx.globalAlpha *= 0.35;
+    for (const line of noteTextLayout(a, this._noteLines(text, a.w))) {
+      if (bars) ctx.fillRect(line.x, line.y + 3, Math.min(line.w, a.w - NOTE_PAD * 2), NOTE_FONT - 5);
+      else ctx.fillText(line.text, line.x, line.y);
     }
     ctx.restore();
+  }
+
+  // A note's text wrapped to its width, with each line's width (world units,
+  // the same at every zoom, so it is worked out once per text and width).
+  _noteLines(text, width) {
+    const key = width + '|' + text;
+    this._noteCache ||= new Map();
+    let lines = this._noteCache.get(key);
+    if (!lines) {
+      const { ctx } = this;
+      ctx.save();
+      ctx.font = NOTE_FONT_CSS;
+      lines = wrapText(ctx, text, width - NOTE_PAD * 2).map((t) => ({ text: t, w: ctx.measureText(t).width }));
+      ctx.restore();
+      if (this._noteCache.size > 500) this._noteCache.clear();
+      this._noteCache.set(key, lines);
+    }
+    return lines;
   }
 
   _drawAnnoChrome(a) {
@@ -691,6 +708,14 @@ export class Diagram {
     el.style.height = (multiline ? a.h : 28) * cam.scale + 'px';
     el.style.fontSize = Math.max(9, 13 * cam.scale) + 'px';
     if (a.type === 'note') {
+      // the text sits where the note draws it: same font, lines and padding,
+      // scaled to the zoom (very far out it stays readable instead)
+      const size = Math.max(9, NOTE_FONT * cam.scale), k = size / NOTE_FONT;
+      el.style.fontFamily = 'ui-sans-serif, system-ui, sans-serif';
+      el.style.fontSize = size + 'px';
+      el.style.lineHeight = NOTE_LINE * k + 'px';
+      el.style.padding = Math.max(0, NOTE_PAD * k - 2) + 'px';     // less the 2 px border
+      el.style.boxSizing = 'border-box';
       // edit on the note's own colour so text stays readable in dark mode
       const c = NOTE_COLORS[a.color] || NOTE_COLORS.yellow;
       el.style.background = c.fill;
@@ -903,7 +928,13 @@ export class Diagram {
     }
     // group boxes: lines keep out of groups that hold neither of their tables
     const groups = this.annotations.filter((a) => a.type === 'group').map((a) => ({ x: a.x, y: a.y, w: a.w, h: a.h }));
-    return { tables, edges, anchors, groups };
+    // sticky notes: lines go around them, as around tables
+    const obstacles = this._noteRects();
+    return { tables, edges, anchors, groups, obstacles };
+  }
+
+  _noteRects() {
+    return this.annotations.filter((a) => a.type === 'note').map((a) => ({ x: a.x, y: a.y, w: a.w, h: a.h }));
   }
 
   _runStraightWorker(message) {
@@ -911,7 +942,8 @@ export class Diagram {
       const worker = new Worker(new URL('./straight-worker.js', import.meta.url), { type: 'module' });
       worker.onmessage = (event) => { if (event.data.partial) return; worker.terminate(); resolve(event.data); };
       worker.onerror = (err) => { worker.terminate(); reject(err); };
-      worker.postMessage({ groups: this._straightInput().groups, ...this.lineSpacing, ...message, hidden: [...this.hidden] });
+      const { groups, obstacles } = this._straightInput();
+      worker.postMessage({ groups, obstacles, ...this.lineSpacing, ...message, hidden: [...this.hidden] });
     });
   }
 
@@ -989,7 +1021,7 @@ export class Diagram {
   _liveInput() {
     const keys = this._movingKeys();
     if (!keys.size) return null;
-    const { tables, edges, groups } = this._straightInput();
+    const { tables, edges, groups, obstacles } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
     const kept = this._handAfterMove(keys);
     const todo = [], keep = {}, anchors = {};
@@ -1003,14 +1035,14 @@ export class Diagram {
       const p = this.edgePaths[e.id];
       if (p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey))) keep[e.id] = p;
     }
-    return todo.length ? { tables, byKey, todo, keep, anchors, groups, followed: kept.paths } : null;
+    return todo.length ? { tables, byKey, todo, keep, anchors, groups, obstacles, followed: kept.paths } : null;
   }
 
   _liveRouteInPage() {
     const input = this._liveInput();
     if (!input) return;
     const started = performance.now();
-    const { paths } = routeMoved(input.todo, input.byKey, { ...this.lineSpacing, anchors: input.anchors, keep: input.keep, groups: input.groups, isHidden: (k) => this.hidden.has(k) });
+    const { paths } = routeMoved(input.todo, input.byKey, { ...this.lineSpacing, anchors: input.anchors, keep: input.keep, groups: input.groups, obstacles: input.obstacles, isHidden: (k) => this.hidden.has(k) });
     if (this._live) this._live.slowMs = performance.now() - started;
     this._livePaths = { ...input.followed, ...paths };
     this.markDirty();
@@ -1033,7 +1065,7 @@ export class Diagram {
       if (live.pending) this._liveRouteInWorker();
     };
     live.worker.onerror = (err) => { live.busy = false; console.error('live routing failed', err); };
-    live.worker.postMessage({ ...this.lineSpacing, tables: input.tables, edges: input.todo, anchors: input.anchors, keep: input.keep, groups: input.groups, moved: true, hidden: [...this.hidden] });
+    live.worker.postMessage({ ...this.lineSpacing, tables: input.tables, edges: input.todo, anchors: input.anchors, keep: input.keep, groups: input.groups, obstacles: input.obstacles, moved: true, hidden: [...this.hidden] });
   }
 
   _stopLiveRoute() {
@@ -1129,9 +1161,10 @@ export class Diagram {
     const { tables, edges, anchors } = this._straightInput();
     const byKey = new Map(tables.map((t) => [t.key, t]));
     const visible = tables.filter((t) => !this.hidden.has(t.key));
+    const notes = this._noteRects();                 // a line under a note is routed again too
     const shown = edges.filter((e) => !this.hidden.has(e.fromKey) && !this.hidden.has(e.toKey));
     const fits = (e, p) => !!p && pathStillFits(p, byKey.get(e.fromKey), byKey.get(e.toKey));
-    const clear = (e, p) => !pathUnderTables(p.points, visible.filter((t) => t.key !== e.fromKey && t.key !== e.toKey));
+    const clear = (e, p) => !pathUnderTables(p.points, [...visible.filter((t) => t.key !== e.fromKey && t.key !== e.toKey), ...notes]);
     const touches = (e) => !!movedKeys && (movedKeys.has(e.fromKey) || movedKeys.has(e.toKey));
     settled = settled || new Set();
 
@@ -2013,6 +2046,9 @@ export class Diagram {
                     (this.annoDrag && this.annoDrag.moved) || (this.annoResize && this.annoResize.moved);
     // tables moved (one table, or a group dragged by its name): re-route lines
     this._linesAfterMove(movedKeys, livePaths);
+    // a sticky note moved or resized: straight lines it now covers go around it
+    const note = (this.annoDrag?.moved && this.annoDrag.a) || (this.annoResize?.moved && this.annoResize.a);
+    if (note?.type === 'note' && !movedKeys.size) this.rerouteStraight();
     this.drag = null;
     this.pan = null;
     this.annoDrag = null;

@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "mcp:install": "node install.cjs",
     "mcp:uninstall": "node install.cjs --uninstall",
-    "test": "node test/edit.test.mjs && node test/edge-routing.test.mjs && node test/search.test.mjs && node test/orthogonal-router.test.mjs && node test/store.test.mjs && node test/columns.test.mjs && node test/self-loop.test.mjs && node test/group-layout.test.mjs"
+    "test": "node test/edit.test.mjs && node test/edge-routing.test.mjs && node test/search.test.mjs && node test/orthogonal-router.test.mjs && node test/store.test.mjs && node test/columns.test.mjs && node test/self-loop.test.mjs && node test/group-layout.test.mjs && node test/notes.test.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4"

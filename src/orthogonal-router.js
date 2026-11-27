@@ -89,6 +89,9 @@ export function autoLineGap(tables) {
   return gaps[gaps.length >> 1] / 3;
 }
 
+// The usable rectangles of a list ({x, y, w, h} with finite numbers, w, h > 0).
+const validRects = (list) => (Array.isArray(list) ? list : []).filter((r) => r && [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w > 0 && r.h > 0);
+
 // A spacing option (px): the given number, or the default when it is missing.
 const spacingOr = (value, fallback) => (value != null && value !== '' && Number.isFinite(+value) ? Math.max(0, +value) : fallback);
 
@@ -187,8 +190,11 @@ const bucketQueue = new BucketQueue();
 // clearance: space (px) kept free around every table.
 // loopCorners: {tableKey: 'left' | 'right'} the top corner a table's loop to
 //   itself takes; by default the one the other lines are expected to leave free.
-export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false, groups = [], crossCost = fast ? FAST_CROSS_COST : CROSS_COST, bendCost = BEND_COST, passes = 0, hint = null, lineGap = null, endSides = 3, groupMargin = GROUP_MARGIN, clearance = CLEARANCE, loopCorners = null } = {}) {
+// obstacles: [{x, y, w, h}] other things lines go around, like tables (sticky
+//   notes); they keep the same clearance but have no entry points.
+export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => false, keep = {}, area = null, fast = false, groups = [], crossCost = fast ? FAST_CROSS_COST : CROSS_COST, bendCost = BEND_COST, passes = 0, hint = null, lineGap = null, endSides = 3, groupMargin = GROUP_MARGIN, clearance = CLEARANCE, loopCorners = null, obstacles = [] } = {}) {
   let tables = [...byKey.values()].filter((t) => Number.isFinite(t.x) && !isHidden(t.key));
+  const walls = validRects(obstacles);
   clearance = spacingOr(clearance, CLEARANCE);
   groupMargin = spacingOr(groupMargin, GROUP_MARGIN);
   // entry points closer than this many grid lines on a table edge cost extra.
@@ -203,8 +209,9 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
   if (!tables.length) return { paths: {}, failed: [], overlapping: [] };
 
   // ---- grid ----
-  const minX = Math.min(...tables.map((t) => t.x)), minY = Math.min(...tables.map((t) => t.y));
-  const maxX = Math.max(...tables.map((t) => t.x + t.w)), maxY = Math.max(...tables.map((t) => t.y + t.h));
+  const extent = [...tables, ...walls];
+  const minX = Math.min(...extent.map((t) => t.x)), minY = Math.min(...extent.map((t) => t.y));
+  const maxX = Math.max(...extent.map((t) => t.x + t.w)), maxY = Math.max(...extent.map((t) => t.y + t.h));
   const ox = Math.floor(minX / GRID) * GRID - PAD_CELLS * GRID;
   const oy = Math.floor(minY / GRID) * GRID - PAD_CELLS * GRID;
   const cols = Math.ceil((maxX - ox) / GRID) + PAD_CELLS + 1;
@@ -221,6 +228,14 @@ export function routeStraight(edges, byKey, { anchors = {}, isHidden = () => fal
     const r0 = Math.max(0, Math.ceil((t.y - clearance - oy) / GRID));
     const r1 = Math.min(rows - 1, Math.floor((t.y + t.h + clearance - oy) / GRID));
     box.set(t.key, { c0, c1, r0, r1 });
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) blocked[at(c, r)] = 1;
+  }
+  // obstacles (sticky notes): walls like tables, with the same clearance
+  for (const o of walls) {
+    const c0 = Math.max(0, Math.ceil((o.x - clearance - ox) / GRID));
+    const c1 = Math.min(cols - 1, Math.floor((o.x + o.w + clearance - ox) / GRID));
+    const r0 = Math.max(0, Math.ceil((o.y - clearance - oy) / GRID));
+    const r1 = Math.min(rows - 1, Math.floor((o.y + o.h + clearance - oy) / GRID));
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) blocked[at(c, r)] = 1;
   }
 
@@ -908,7 +923,7 @@ export function routeStraightTidy(edges, byKey, opts = {}) {
     const selfIds = new Set(edges.filter((e) => e.fromKey === e.toKey).map((e) => e.id));
     const loops = {}, rest = {};
     for (const [id, p] of Object.entries(best.paths)) (selfIds.has(id) ? loops : rest)[id] = p;
-    const spread = spreadParallel(rest, { tables, gap, fixed: { ...opts.keep, ...loops }, groups: opts.groups, groupMargin: opts.groupMargin, clearance: opts.clearance });
+    const spread = spreadParallel(rest, { tables: [...tables, ...validRects(opts.obstacles)], gap, fixed: { ...opts.keep, ...loops }, groups: opts.groups, groupMargin: opts.groupMargin, clearance: opts.clearance });
     best.paths = { ...spread, ...loops };
   }
   return best;
